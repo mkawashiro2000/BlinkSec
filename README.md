@@ -21,7 +21,7 @@ SIEM ──HMAC──▶ WF-00 gateway ──▶ WF-01 normalizar ──▶ WF-0
 ## Estado
 
 MVP funcional, **desplegado y verificado en ejecución real** sobre n8n 1.72.1
-(Docker, modo queue, Postgres + Redis). 152 tests en verde.
+(Docker, modo queue, Postgres + Redis + Caddy). 155 tests en verde.
 
 Verificado de extremo a extremo contra el despliegue:
 
@@ -38,6 +38,14 @@ Verificado de extremo a extremo contra el despliegue:
   test.
 - Simulacros de caída de Redis y Postgres, con recuperación automática
   verificada.
+- **Capa perimetral (Caddy) probada de extremo a extremo**: TLS, allowlist de
+  gestión (403 real fuera de rango) y rate limiting (120 eventos/min, con
+  `429` a partir del umbral y recuperación tras la ventana). Se encontró y
+  corrigió un fallo real: `docker-compose.yml` no propagaba `MGMT_ALLOWLIST`
+  ni `ACME_EMAIL` al contenedor, así que Caddy ignoraba en silencio la
+  restricción del `.env` y caía a su default de "cualquier red privada". Ver
+  R-12 en `docs/riesgos.md`. Ahora hay un chequeo dedicado
+  (`npm run check:caddy-env`) que lo bloquea en CI.
 
 Lo que **no** está verificado: las APIs reales de inteligencia (no hay claves),
 un manager de Wazuh real, y la contención real sobre un firewall. Ver

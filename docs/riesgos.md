@@ -208,6 +208,42 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-12 · Caddy verificado en ejecución real (CERRADO, con un fallo real corregido)
+
+La capa perimetral (TLS, allowlist de red, rate limiting) estuvo sin ejecutar
+ni una sola vez hasta este punto. Se levantó el build propio con el módulo
+`caddy-ratelimit` y se probaron los tres controles contra el proxy real:
+
+| Control | Prueba | Resultado |
+|---|---|---|
+| TLS | Petición HTTPS firmada de extremo a extremo a través de Caddy | `200 {"accepted":true}` |
+| Allowlist de gestión | Petición al editor desde fuera de `MGMT_ALLOWLIST` | `403` |
+| Rate limiting | 130 peticiones seguidas contra `/webhook/*` (límite 120/min) | 119 pasan, 11 con `429`; recupera tras la ventana |
+
+**El fallo real, encontrado al intentar verificar el 403.** `docker-compose.yml`
+sólo propagaba `N8N_HOST` y `SIEM_ALLOWLIST` al contenedor de Caddy.
+`MGMT_ALLOWLIST` y `ACME_EMAIL` se leen en el Caddyfile pero **nunca llegaban**:
+Caddy caía en silencio a su default hardcodeado
+(`10.0.0.0/8 172.16.0.0/12 192.168.0.0/16`, es decir *cualquier red privada*).
+El `.env` del operador restringiendo el acceso al editor no tenía ningún
+efecto, y no había ningún error que lo señalara — la primera prueba con la red
+docker de este host dio `200` porque esa red cae dentro del default, no porque
+la configuración propia estuviera funcionando.
+
+**Corregido**: las cuatro variables se propagan ahora en
+`docker-compose.yml`. Se añadió `tools/check-caddy-env.js`, que compara
+estáticamente las variables `{$VAR}` que el Caddyfile referencia contra las
+que el compose declara, y falla si falta alguna. Cableado en
+`npm run verify`, en CI y con test dedicado
+(`tests/build/caddy-env.test.js`) — la misma clase de guarda que ya existía
+para los workflows de n8n, aplicada aquí a la infraestructura.
+
+**Riesgo residual.** El chequeo es sintáctico: detecta que la variable se
+propaga, no que el valor sea el correcto. Sigue siendo responsabilidad del
+runbook de despliegue verificar el 403 real tras cambiar `MGMT_ALLOWLIST`,
+como se hizo aquí — no basta con confiar en que "el nombre de la variable
+coincide".
+
 ## R-10 · Modos de fallo silencioso de n8n (CERRADOS, con guardas)
 
 El primer despliegue real destapó cinco fallos que **no producían ningún

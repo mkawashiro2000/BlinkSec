@@ -25,6 +25,14 @@ jobs:
       - name: Verificar que los workflows compilados están al día
         run: node tools/build-workflows.js --check
 
+      # Encontrado en la Fase 7 desplegando de verdad: docker-compose.yml no
+      # propagaba MGMT_ALLOWLIST ni ACME_EMAIL al contenedor de Caddy, así que
+      # el .env del operador se ignoraba en silencio. Ver R-12 en docs/riesgos.md.
+      # (tests/build/caddy-env.test.js también lo cubre; este paso da un
+      # mensaje de error más directo si falla.)
+      - name: Verificar que docker-compose.yml propaga todas las variables del Caddyfile
+        run: node tools/check-caddy-env.js
+
       - name: Tests
         run: npm test
 

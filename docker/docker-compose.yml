@@ -151,6 +151,13 @@ services:
     environment:
       N8N_HOST: ${N8N_HOST}
       SIEM_ALLOWLIST: ${SIEM_ALLOWLIST}
+      # Sin estas dos, el Caddyfile cae en silencio a sus defaults
+      # hardcodeados: MGMT_ALLOWLIST se abriría a *toda* red privada
+      # (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) sin que el .env del
+      # operador tuviera ningún efecto. Encontrado en la Fase 7 verificando
+      # el rechazo real del editor — el .env restringido no bloqueaba nada.
+      MGMT_ALLOWLIST: ${MGMT_ALLOWLIST}
+      ACME_EMAIL: ${ACME_EMAIL}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -5,6 +5,10 @@ docker/.env
 *.pem
 credentials.json
 
+# Override de puertos/entorno sólo para pruebas locales (ver Fase 7: puertos
+# 80/443 ocupados por otros servicios del host). Nunca representa producción.
+docker/docker-compose.override.yml
+
 # Workflow exports may contain embedded credentials if exported wrong.
 # Only the sanitized files under workflows/ are tracked; scratch exports are not.
 workflows/*.raw.json

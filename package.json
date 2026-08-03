@@ -12,6 +12,7 @@
     "test:gateway": "node --test tests/gateway/*.test.js",
     "test:triage": "node --test tests/triage/*.test.js",
     "build": "node tools/build-workflows.js",
-    "verify": "npm run build -- --check && npm test"
+    "check:caddy-env": "node tools/check-caddy-env.js",
+    "verify": "npm run build -- --check && npm run check:caddy-env && npm test"
   }
 }

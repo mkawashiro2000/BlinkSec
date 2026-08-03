@@ -21,7 +21,26 @@ Ajustar `SIEM_ALLOWLIST` (IPs de los colectores) y `MGMT_ALLOWLIST` (desde
 dónde se abre el editor). El editor de n8n expuesto a internet es ejecución
 remota de código con pasos extra.
 
+Antes de levantar nada, comprobar que `docker-compose.yml` propaga al
+contenedor de Caddy toda variable que el `Caddyfile` referencia:
+
 ```bash
+npm run check:caddy-env
+```
+
+> Esto no es opcional. En el primer despliegue, `MGMT_ALLOWLIST` y
+> `ACME_EMAIL` se leían en el `Caddyfile` pero el compose no los declaraba en
+> el `environment:` del servicio — Caddy caía en silencio a su default
+> hardcodeado (*cualquier red privada*) y el `.env` del operador no tenía
+> ningún efecto sobre el acceso al editor. Sin error visible. Ver R-12 en
+> `docs/riesgos.md`.
+
+Caddy usa una imagen construida en el propio compose (necesita el módulo
+`caddy-ratelimit`, ausente en la imagen oficial); la primera vez tarda varios
+minutos en compilar:
+
+```bash
+docker compose -f docker/docker-compose.yml build caddy
 docker compose -f docker/docker-compose.yml up -d
 docker compose -f docker/docker-compose.yml ps
 ```
@@ -30,15 +49,40 @@ El esquema de Postgres se crea solo la primera vez desde
 `docker/initdb/01-blinksec-schema.sql`. Si el volumen ya existía, aplicarlo a
 mano.
 
-Verificación:
+**Verificación de la capa perimetral.** Los tres controles se prueban por
+separado — cada uno protege contra algo distinto y ha fallado de forma
+independiente en el pasado:
 
 ```bash
+# 1. Superficie pública: 403 fuera de SIEM_ALLOWLIST, 400/401 dentro (sin firma)
 curl -sk https://TU_HOST/webhook/blinksec/ingest -X POST -d '{}' -o /dev/null -w '%{http_code}\n'
 ```
 
-Desde una IP fuera de `SIEM_ALLOWLIST` debe responder `403`. Desde una IP
-autorizada, `401` (sin firma). Un `200` aquí significa que el gateway no está
-verificando: parar y revisar antes de seguir.
+Un `200` aquí significa que el gateway no está verificando la firma: parar y
+revisar antes de seguir.
+
+```bash
+# 2. Editor: 403 desde fuera de MGMT_ALLOWLIST
+curl -sk https://TU_HOST/ -o /dev/null -w '%{http_code}\n'
+```
+
+Probar este paso **desde una máquina fuera de `MGMT_ALLOWLIST`**, no desde el
+propio servidor — localhost y la red interna suelen colar por accidente dentro
+del rango permitido, y eso es exactamente lo que ocultó el fallo de R-12 en
+las pruebas iniciales.
+
+```bash
+# 3. Rate limiting: tras el umbral configurado (120/min por defecto),
+#    las peticiones extra devuelven 429 y se recuperan pasada la ventana.
+for i in $(seq 1 130); do
+  curl -sk -o /dev/null -w '%{http_code}\n' https://TU_HOST/webhook/blinksec/ingest -X POST -d '{}'
+done | sort | uniq -c
+```
+
+Debe aparecer un bloque de `429` a partir de la petición 121 aproximadamente.
+Si todas dan el mismo código, el módulo `rate_limit` no está activo — revisar
+que la imagen se construyó con `Dockerfile.caddy` y no con `caddy:2.8-alpine`
+a secas.
 
 ## 2. Credenciales en n8n
 
