@@ -1,9 +1,16 @@
 # Secrets — never commit
 .env
+.env.*
+!.env.example
 docker/.env
+docker/.env.*
+!docker/.env.example
 *.key
 *.pem
-credentials.json
+*.p12
+*.pfx
+**/credentials*.json
+*.secrets.json
 
 # Override de puertos/entorno sólo para pruebas locales (ver Fase 7: puertos
 # 80/443 ocupados por otros servicios del host). Nunca representa producción.
@@ -25,3 +32,7 @@ n8n-data/
 
 # OS
 .DS_Store
+
+# Editores
+*.swp
+*.swo
