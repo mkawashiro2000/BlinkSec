@@ -208,6 +208,41 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-15 · Sin DNS a internet desde los contenedores (CERRADO, alcance de todo el host)
+
+Al conectar la credencial real de Slack, n8n reportaba "Couldn't connect with
+these settings" — parecía un problema del token, y no lo era. Diagnóstico
+desde el servidor: `fetch('https://slack.com/...')` desde dentro del
+contenedor `n8n-main` fallaba con `EAI_AGAIN` (fallo de resolución DNS), pese
+a que el propio host resolvía `slack.com` sin problema.
+
+**Causa: el host no propaga ningún servidor de nombres externo a Docker.**
+`/etc/resolv.conf` del host no lista ningún `nameserver` explícito
+(gestiona DNS vía `systemd-resolved` sin volcarlo al fichero), así que Docker
+no tiene de dónde heredar uno para los contenedores — su comentario interno
+lo deja explícito: `NO EXTERNAL NAMESERVERS DEFINED`.
+
+**Alcance confirmado: todo el host, no sólo BlinkSec.** Un contenedor
+completamente ajeno a este proyecto (`nextcloud`) presenta exactamente el
+mismo aviso. Es plausible que otros servicios en esta máquina que dependan de
+salida a internet desde dentro de un contenedor tengan el mismo problema sin
+haberlo notado todavía.
+
+**Corregido sólo para BlinkSec**, sin tocar la configuración del demonio
+Docker del host (eso afectaría a Nextcloud, Jellyfin, Kensho y todo lo demás
+que corre en esta máquina — fuera del alcance de este proyecto y de mi
+autorización para tocarlo sin más). `docker-compose.yml` declara
+`dns: [1.1.1.1, 8.8.8.8]` en el ancla compartida de los tres servicios de n8n.
+Verificado con una llamada real a `slack.com` desde el contenedor tras
+recrearlo.
+
+**Recomendación pendiente, no aplicada**: si otros proyectos de este host
+también dependen de resolución DNS externa desde dentro de un contenedor
+(no sólo BlinkSec), vale la pena revisar si conviene arreglarlo a nivel del
+demonio Docker (`/etc/docker/daemon.json` → `"dns": [...]`) en vez de
+repetir `dns:` en cada `docker-compose.yml` del host — decisión del
+operador, no tomada aquí.
+
 ## R-14 · GreyNoise Community en vez de tier de pago (ACEPTADO, con adaptación de código)
 
 La cuenta real conectada es GreyNoise **Community** (nivel gratuito), no el

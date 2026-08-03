@@ -15,6 +15,19 @@
 x-n8n-common: &n8n-common
   image: n8nio/n8n:1.72.1
   restart: unless-stopped
+  # Sin esto, los nodos HTTP Request hacia APIs externas (GreyNoise, Slack,
+  # VirusTotal...) fallan con "fetch failed" — no un error de credencial, un
+  # fallo de resolución DNS. El /etc/resolv.conf del host no lista servidores
+  # de nombres externos explícitos (probablemente gestiona DNS vía
+  # systemd-resolved sin volcarlo al fichero), así que Docker no tiene de
+  # dónde heredarlo para los contenedores. Confirmado que es un problema del
+  # HOST, no de este proyecto: otros contenedores ajenos a BlinkSec en la
+  # misma máquina tienen el mismo aviso "NO EXTERNAL NAMESERVERS DEFINED".
+  # Se fija aquí, sólo para los servicios de n8n, sin tocar el demonio Docker
+  # del host (eso afectaría a todos los demás proyectos que corren en él).
+  dns:
+    - 1.1.1.1
+    - 8.8.8.8
   environment: &n8n-env
     # --- Base de datos ---
     DB_TYPE: postgresdb
