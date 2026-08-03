@@ -1,0 +1,306 @@
+{
+  "name": "[BlinkSec] WF-07 - Reversion programada - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "wf07-cron",
+      "name": "Cada 15 minutos",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, alert_id, action_type, target, platform, undo_payload, expires_at\nFROM blinksec.containment_log\nWHERE reverted_at IS NULL\n  AND expires_at <= now()\n  AND undo_payload IS NOT NULL\n  AND action_type IN ('block_ip', 'isolate_host')\nORDER BY expires_at ASC\nLIMIT 50;",
+        "options": {}
+      },
+      "id": "wf07-query",
+      "name": "Contenciones vencidas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -380,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "alwaysOutputData": true,
+      "notes": "Se excluyen revoke_session y kill_process: no son reversibles por naturaleza. LIMIT 50 evita que un backlog acumulado sature las APIs en una sola pasada."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-hay",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "number",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf07-if-hay",
+      "name": "¿Hay algo que revertir?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://wazuh.example.com:55000{{ $json.undo_payload.path }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.undo_payload.body ?? {}) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "wf07-revert",
+      "name": "Ejecutar reversión",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        60,
+        220
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-wazuh",
+          "name": "Wazuh API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-07 · Registro del resultado de la reversión.\n//\n// Una reversión fallida es MÁS grave que una contención fallida: significa\n// que hay una regla de firewall activa que nadie va a quitar y que el sistema\n// cree haber gestionado. Se registra el error explícitamente para que aparezca\n// en el informe de guardia en lugar de desvanecerse.\n\nconst fila = $('Contenciones vencidas').first().json;\nconst respuesta = $input.first().json;\n\nconst ok = (respuesta.statusCode ?? 0) >= 200 && (respuesta.statusCode ?? 0) < 300;\n\nreturn [\n  {\n    json: {\n      id: fila.id,\n      alert_id: fila.alert_id,\n      target: fila.target,\n      action_type: fila.action_type,\n      ok,\n      error: ok ? null : `HTTP ${respuesta.statusCode}: ${JSON.stringify(respuesta.body ?? {}).slice(0, 300)}`,\n    },\n  },\n];"
+      },
+      "id": "wf07-result",
+      "name": "Evaluar resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE blinksec.containment_log\nSET reverted_at = CASE WHEN $2::boolean THEN now() ELSE NULL END,\n    revert_error = $3\nWHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.id }},{{ $json.ok }},{{ $json.error }}"
+        }
+      },
+      "id": "wf07-update",
+      "name": "Actualizar registro",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        500,
+        220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "notes": "Si falla, reverted_at queda NULL y la fila se reintentará en la siguiente pasada. La reversión es idempotente: quitar una regla inexistente no rompe nada."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-fallo",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf07-if-fallo",
+      "name": "¿Falló la reversión?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-guardia",
+          "mode": "name"
+        },
+        "text": "=⚠️ Reversión fallida: `{{ $json.action_type }}` sobre `{{ $json.target }}` sigue activa tras vencer. Requiere intervención manual.\n\n`{{ $json.error }}`",
+        "otherOptions": {}
+      },
+      "id": "wf07-alert",
+      "name": "Avisar a guardia",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        140
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Cada 15 minutos": {
+      "main": [
+        [
+          {
+            "node": "Contenciones vencidas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contenciones vencidas": {
+      "main": [
+        [
+          {
+            "node": "¿Hay algo que revertir?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Hay algo que revertir?": {
+      "main": [
+        [
+          {
+            "node": "Ejecutar reversión",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Ejecutar reversión": {
+      "main": [
+        [
+          {
+            "node": "Evaluar resultado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluar resultado": {
+      "main": [
+        [
+          {
+            "node": "Actualizar registro",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar registro": {
+      "main": [
+        [
+          {
+            "node": "¿Falló la reversión?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Falló la reversión?": {
+      "main": [
+        [
+          {
+            "node": "Avisar a guardia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 5,
+      "descripcion": "Recorre containment_log y revierte las contenciones vencidas. Impide que el SOAR acumule reglas de firewall permanentes que nadie recuerda por qué existen."
+    }
+  }
+}

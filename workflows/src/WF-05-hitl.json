@@ -1,0 +1,140 @@
+{
+  "name": "[BlinkSec] WF-05 - Human in the loop - v1",
+  "nodes": [
+    {
+      "parameters": { "workflowInputs": { "values": [] } },
+      "id": "wf05-trigger",
+      "name": "Entrada desde WF-04",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-05 · Construcción del mensaje de aprobación.\n//\n// El analista tiene que poder decidir SIN salir de Slack y sin abrir otra\n// herramienta. Si para entender la alerta hay que ir al SIEM, el\n// Human-in-the-Loop no reduce la latencia: la multiplica.\n//\n// Por eso el mensaje incluye el rationale completo del motor de triaje: no\n// 'puntuación 87', sino POR QUÉ 87.\n\nconst a = $input.first().json;\nconst t = a.triage ?? {};\nconst acciones = a.plan?.actions ?? [];\n\nconst resumenAcciones = acciones\n  .map((ac) => `• \\`${ac.action_type}\\` sobre \\`${ac.target}\\` (${ac.platform}, caduca ${ac.expires_at})`)\n  .join('\\n');\n\nconst motivos = (t.rationale ?? []).map((r) => `• ${r}`).join('\\n');\n\nconst bloques = [\n  {\n    type: 'header',\n    text: { type: 'plain_text', text: `🚨 Aprobación requerida — ${a.asset?.host ?? 'host desconocido'}` },\n  },\n  {\n    type: 'section',\n    fields: [\n      { type: 'mrkdwn', text: `*Puntuación:*\\n${t.score}/100` },\n      { type: 'mrkdwn', text: `*Criticidad del activo:*\\n${a.asset?.criticality ?? 'desconocida'}` },\n      { type: 'mrkdwn', text: `*Regla:*\\n${a.rule?.name ?? '—'}` },\n      { type: 'mrkdwn', text: `*Origen:*\\n${a.source ?? '—'}` },\n    ],\n  },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Por qué:*\\n${motivos || '—'}` } },\n  { type: 'section', text: { type: 'mrkdwn', text: `*Acciones propuestas:*\\n${resumenAcciones || '—'}` } },\n  {\n    type: 'context',\n    elements: [\n      {\n        type: 'mrkdwn',\n        text: `alert_id \\`${a.alert_id}\\` · sin respuesta en 15 min se escala a guardia y *no se ejecuta nada*`,\n      },\n    ],\n  },\n  {\n    type: 'actions',\n    elements: [\n      {\n        type: 'button',\n        style: 'danger',\n        text: { type: 'plain_text', text: 'Contener ahora' },\n        // $execution.resumeUrl es la URL que genera el nodo Wait. Es un token\n        // de un solo uso: quien la tenga puede reanudar esta ejecución y sólo\n        // ésta, lo que hace innecesario autenticar el callback.\n        url: `{{ $execution.resumeUrl }}?decision=approve&by={{ '{{user.name}}' }}`,\n        value: 'approve',\n        action_id: 'blinksec_approve',\n      },\n      {\n        type: 'button',\n        text: { type: 'plain_text', text: 'Ignorar' },\n        url: `{{ $execution.resumeUrl }}?decision=reject&by={{ '{{user.name}}' }}`,\n        value: 'reject',\n        action_id: 'blinksec_reject',\n      },\n    ],\n  },\n];\n\nreturn [{ json: { ...a, slackBlocks: bloques } }];"
+      },
+      "id": "wf05-build",
+      "name": "Construir mensaje Slack",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#soc-alerts", "mode": "name" },
+        "text": "=Aprobación requerida para contener {{ $json.asset.host }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "blocksUi": "={{ JSON.stringify($json.slackBlocks) }}"
+        }
+      },
+      "id": "wf05-slack",
+      "name": "Enviar a Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [-160, 300],
+      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "notes": "Si Slack está caído no se puede pedir aprobación. onError deja seguir para que el nodo Wait expire y aplique el comportamiento fail-safe: no ejecutar nada.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "=/{{ $json.alert_id }}",
+          "limitWaitTime": true,
+          "resumeAmount": 15,
+          "resumeUnit": "minutes"
+        }
+      },
+      "id": "wf05-wait",
+      "name": "Esperar decisión humana",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [60, 300],
+      "webhookId": "blinksec-hitl",
+      "notes": "La ejecución queda suspendida en el servidor, sin consumir un worker. Al expirar los 15 min el flujo continúa SIN decisión — y la rama de abajo interpreta eso como rechazo. Fail-safe, no fail-open."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-05 · Interpretación de la decisión.\n//\n// Decisión de diseño que no se negocia: el TIMEOUT ES RECHAZO.\n//\n// La alternativa —ejecutar la contención si nadie responde— convertiría el\n// Human-in-the-Loop en un retardo de 15 minutos sin ningún control real. Si\n// la evidencia bastara para actuar sin supervisión, no habríamos pedido\n// aprobación. Que nadie conteste de madrugada no cambia esa evidencia.\n\nconst esperado = $('Construir mensaje Slack').first().json;\nconst reanudacion = $input.first().json;\n\n// Al reanudar por webhook, n8n expone los parámetros de consulta. Si el nodo\n// expiró por tiempo, no habrá ninguno.\nconst query = reanudacion.query ?? {};\nconst decision = query.decision ?? null;\nconst quien = query.by ?? null;\n\nconst aprobado = decision === 'approve';\n\nreturn [\n  {\n    json: {\n      ...esperado,\n      aprobado,\n      aprobadoPor: aprobado ? quien : null,\n      decision: decision ?? 'timeout',\n      decididoEn: new Date().toISOString(),\n      motivoRechazo: decision === null ? 'sin respuesta humana en la ventana de 15 min' : null,\n    },\n  },\n];"
+      },
+      "id": "wf05-decision",
+      "name": "Interpretar decisión",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "c-timeout",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "timeout",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf05-if-timeout",
+      "name": "¿Expiró sin respuesta?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#soc-guardia", "mode": "name" },
+        "text": "=⏰ Escalado: la aprobación para `{{ $json.asset.host }}` (alert_id `{{ $json.alert_id }}`) expiró sin respuesta en 15 min. *No se ha ejecutado ninguna contención.* Puntuación {{ $json.triage.score }}/100.",
+        "otherOptions": {}
+      },
+      "id": "wf05-escalate",
+      "name": "Escalar a guardia",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [720, 200],
+      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-04": {
+      "main": [[{ "node": "Construir mensaje Slack", "type": "main", "index": 0 }]]
+    },
+    "Construir mensaje Slack": {
+      "main": [[{ "node": "Enviar a Slack", "type": "main", "index": 0 }]]
+    },
+    "Enviar a Slack": {
+      "main": [[{ "node": "Esperar decisión humana", "type": "main", "index": 0 }]]
+    },
+    "Esperar decisión humana": {
+      "main": [[{ "node": "Interpretar decisión", "type": "main", "index": 0 }]]
+    },
+    "Interpretar decisión": {
+      "main": [[{ "node": "¿Expiró sin respuesta?", "type": "main", "index": 0 }]]
+    },
+    "¿Expiró sin respuesta?": {
+      "main": [[{ "node": "Escalar a guardia", "type": "main", "index": 0 }], []]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 5,
+      "descripcion": "Suspende la ejecución hasta que un analista aprueba desde Slack. El timeout equivale a rechazo: sin respuesta humana no se toca producción."
+    }
+  }
+}

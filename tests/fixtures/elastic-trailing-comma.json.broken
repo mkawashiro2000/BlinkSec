@@ -1,0 +1,1 @@
+[{"context":{"@timestamp":"2026-08-02T13:05:00.000Z","rule":{"id":"b2d4f6a8-1111-2222-3333-444455556666","name":"Outbound Connection to Tor Exit Node","severity":"medium","threat":{"technique":{"id":["T1090.003"]}}},"host":{"name":"web-02","ip":"10.20.4.12"},"user":{"name":"www-data"},"destination":{"ip":"171.25.193.78"},"source":{"ip":"10.20.4.12"}}},]

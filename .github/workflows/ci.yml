@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # El paso que impide el modo de fallo más peligroso del repo: que
+      # workflows/dist/ quede desincronizado de lib/ y scoring/. Si eso pasa,
+      # los tests seguirían en verde mientras producción ejecuta código viejo.
+      - name: Verificar que los workflows compilados están al día
+        run: node tools/build-workflows.js --check
+
+      - name: Tests
+        run: npm test
+
+      # Comprobación de higiene: ningún secreto real en el repo. Los ficheros
+      # de ejemplo llevan placeholders y deben seguir llevándolos.
+      - name: Comprobar que no hay secretos commiteados
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "ERROR: hay un .env versionado"
+            exit 1
+          fi
+          if grep -rIn --exclude-dir=.git -E '"[a-f0-9]{64}"' docker/.env.example integrations/ 2>/dev/null | grep -v SUSTITUIR; then
+            echo "ERROR: posible secreto real en ficheros de ejemplo"
+            exit 1
+          fi
+          echo "OK"
+
+  sintaxis-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compilar los scripts de integración
+        run: |
+          python3 -m py_compile \
+            integrations/wazuh/custom-n8n.py \
+            integrations/wazuh/custom-ar.py \
+            integrations/splunk/send_to_blinksec.py
+      - name: Self-test de firma del emisor de Splunk
+        run: python3 integrations/splunk/send_to_blinksec.py --self-test

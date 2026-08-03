@@ -1,0 +1,171 @@
+{
+  "name": "[BlinkSec] WF-00 - Gateway de ingesta - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "blinksec/ingest",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "wf00-webhook",
+      "name": "Webhook Ingesta",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-400, 300],
+      "webhookId": "blinksec-ingest",
+      "notes": "rawBody DEBE estar activo: el HMAC se calcula sobre el cuerpo sin parsear. Con el JSON ya parseado la firma nunca coincide."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-00 · Verificación de firma, ventana temporal y origen.\n//\n// Primera barrera del SOAR. Todo lo que pase de aquí se considera una alerta\n// auténtica de un colector autorizado.\n\n// @blinksec-inject: lib/gateway.js\n\nconst req = $input.first().json;\n\nconst secrets = {\n  wazuh: $env.BLINKSEC_HMAC_SECRET_WAZUH,\n  splunk: $env.BLINKSEC_HMAC_SECRET_SPLUNK,\n  elastic: $env.BLINKSEC_HMAC_SECRET_ELASTIC,\n};\n\nconst windowSeconds = Number($env.BLINKSEC_REPLAY_WINDOW_SECONDS || 300);\n\ntry {\n  const verificado = verifyRequest(\n    { headers: req.headers, rawBody: req.rawBody },\n    { secrets, windowSeconds },\n  );\n\n  return [\n    {\n      json: {\n        ok: true,\n        source: verificado.source,\n        rawBody: verificado.rawBody,\n        receivedAt: new Date().toISOString(),\n        ingestStartedAt: Date.now(),\n      },\n    },\n  ];\n} catch (e) {\n  // No se propaga la excepción: se devuelve un objeto de rechazo para que el\n  // nodo IF responda con el código correcto y WF-99 registre el intento.\n  // Un webhook que devuelve 500 ante una firma inválida le está diciendo al\n  // atacante que su petición llegó a la lógica de negocio.\n  return [\n    {\n      json: {\n        ok: false,\n        rejectionCode: e.code || 'error_desconocido',\n        rejectionMessage: e.message,\n        httpStatus: e.httpStatus || 401,\n        sourceHeader: req.headers?.['x-blinksec-source'] || null,\n        remoteIp: req.headers?.['x-real-ip'] || null,\n      },\n    },\n  ];\n}"
+      },
+      "id": "wf00-verify",
+      "name": "Verificar HMAC y Replay",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-180, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "cond-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf00-if-valid",
+      "name": "¿Firma válida?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [40, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-00 · Extracción del identificador determinista de la alerta.\n//\n// El alert_id es la clave de idempotencia de todo el sistema. Se deriva del\n// contenido, no se genera al azar: si el SIEM reenvía la misma alerta (timeout\n// y reintento, doble configuración de integración), debe producir el mismo id\n// para que se descarte en vez de abrir un segundo ticket y ejecutar la\n// contención dos veces.\n\n// @blinksec-inject: lib/gateway.js\n\nconst item = $input.first().json;\nconst source = item.source;\n\nlet body;\ntry {\n  body = JSON.parse(item.rawBody);\n} catch (e) {\n  // Elastic puede enviar ndjson o arrays con coma terminal. Aquí sólo hace\n  // falta un identificador; el saneado completo lo hace WF-01.\n  const primera = item.rawBody.split('\\n')[0].replace(/,\\s*([\\]}])/g, '$1');\n  body = JSON.parse(primera.startsWith('[') ? primera.slice(1) : primera);\n}\n\nconst extractores = {\n  wazuh: (b) => ({\n    ruleId: b.rule?.id,\n    eventTimestamp: b.timestamp,\n    host: b.agent?.name,\n    srcIp: b.data?.srcip,\n  }),\n  splunk: (b) => ({\n    ruleId: b.search_name || b.sid,\n    eventTimestamp: b.result?._time,\n    host: b.result?.host || b.result?.dest,\n    srcIp: b.result?.src_ip,\n  }),\n  elastic: (b) => {\n    const c = b.context || b;\n    return {\n      ruleId: c.rule?.id,\n      eventTimestamp: c['@timestamp'],\n      host: c.host?.name,\n      srcIp: c.source?.ip,\n    };\n  },\n};\n\nconst partes = extractores[source](body);\nconst alertId = deriveAlertId(source, partes);\n\nreturn [\n  {\n    json: {\n      ...item,\n      alertId,\n      idempotencyKey: `blinksec:nonce:${alertId}`,\n      agentId: body.agent?.id ?? null,\n    },\n  },\n];"
+      },
+      "id": "wf00-alert-id",
+      "name": "Derivar alert_id",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 200]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.idempotencyKey }}",
+        "value": "={{ $json.receivedAt }}",
+        "keyType": "string",
+        "expire": true,
+        "ttl": 86400,
+        "options": {}
+      },
+      "id": "wf00-redis-nonce",
+      "name": "Reclamar nonce (Redis)",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [480, 200],
+      "credentials": { "redis": { "id": "blinksec-redis", "name": "BlinkSec Redis" } },
+      "notes": "Idempotencia. Lo correcto es SETNX (sólo escribe si no existe); si la versión del nodo Redis no lo expone, usar el nodo anterior en modo 'get' y un IF. Ver docs/runbook-idempotencia.md.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-01", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "id": "wf00-call-normalize",
+      "name": "Invocar WF-01 Normalización",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [700, 200],
+      "notes": "waitForSubWorkflow=false: el webhook responde 200 de inmediato. El SIEM no debe esperar a que termine el enriquecimiento — Wazuh corta a los 10 s y daría la alerta por perdida."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true, alert_id: $json.alertId }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "wf00-respond-ok",
+      "name": "200 Aceptada",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [920, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.rejectionCode }) }}",
+        "options": { "responseCode": "={{ $json.httpStatus }}" }
+      },
+      "id": "wf00-respond-reject",
+      "name": "Rechazar",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [260, 420],
+      "notes": "El cuerpo sólo lleva el código de rechazo, nunca el detalle. Decirle al emisor 'el timestamp se desvía 340 s' le regala información para afinar el ataque."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-00 · Telemetría de rechazos.\n//\n// Un pico de rechazos es una señal de seguridad de primer orden: o alguien\n// está sondeando el webhook, o una integración legítima se rompió tras una\n// rotación de secreto. Ambos casos exigen aviso; distinguirlos es trabajo del\n// analista, no del flujo.\n\nconst r = $input.first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'ingesta_rechazada',\n      codigo: r.rejectionCode,\n      origen: r.sourceHeader,\n      ip: r.remoteIp,\n      timestamp: new Date().toISOString(),\n      // Los fallos de firma tras una rotación son ruidosos pero benignos.\n      // Los de origen desconocido son casi siempre sondeo.\n      severidad: r.rejectionCode === 'origen_desconocido' ? 'alta' : 'media',\n    },\n  },\n];"
+      },
+      "id": "wf00-log-reject",
+      "name": "Registrar rechazo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 420]
+    }
+  ],
+  "connections": {
+    "Webhook Ingesta": {
+      "main": [[{ "node": "Verificar HMAC y Replay", "type": "main", "index": 0 }]]
+    },
+    "Verificar HMAC y Replay": {
+      "main": [[{ "node": "¿Firma válida?", "type": "main", "index": 0 }]]
+    },
+    "¿Firma válida?": {
+      "main": [
+        [{ "node": "Derivar alert_id", "type": "main", "index": 0 }],
+        [{ "node": "Rechazar", "type": "main", "index": 0 }]
+      ]
+    },
+    "Derivar alert_id": {
+      "main": [[{ "node": "Reclamar nonce (Redis)", "type": "main", "index": 0 }]]
+    },
+    "Reclamar nonce (Redis)": {
+      "main": [[{ "node": "Invocar WF-01 Normalización", "type": "main", "index": 0 }]]
+    },
+    "Invocar WF-01 Normalización": {
+      "main": [[{ "node": "200 Aceptada", "type": "main", "index": 0 }]]
+    },
+    "Rechazar": {
+      "main": [[{ "node": "Registrar rechazo", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 1,
+      "descripcion": "Única superficie pública del sistema. Verifica firma HMAC, ventana anti-replay e idempotencia antes de que cualquier alerta toque la lógica de negocio.",
+      "tests": "tests/gateway/"
+    }
+  }
+}

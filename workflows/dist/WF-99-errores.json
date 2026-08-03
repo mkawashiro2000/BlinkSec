@@ -1,0 +1,159 @@
+{
+  "name": "[BlinkSec] WF-99 - Manejador global de errores - v1",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "wf99-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        300
+      ],
+      "notes": "Se declara como errorWorkflow en el resto de flujos. Recibe la ejecución fallida completa, con el nodo que reventó y su mensaje."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-99 · Clasificación del fallo.\n//\n// No todos los errores merecen la misma respuesta, y tratarlos igual produce\n// el peor resultado posible: o se despierta a la guardia por un 429 que se\n// resolvió solo, o se entierra un 401 de credencial caducada entre el ruido\n// hasta que alguien nota que el SOAR lleva dos días ciego.\n//\n//   TRANSITORIO  → se registra, no se avisa. El reintento del nodo ya actuó.\n//   CONFIGURACIÓN→ aviso inmediato. No se arregla solo y deja el SOAR ciego.\n//   DATOS        → aviso al equipo de detección: una regla de origen está mal.\n//   DESCONOCIDO  → aviso, por si acaso.\n\nconst e = $input.first().json;\n\nconst mensaje = e.execution?.error?.message ?? e.error?.message ?? 'sin mensaje';\nconst nodo = e.execution?.lastNodeExecuted ?? 'desconocido';\nconst flujo = e.workflow?.name ?? 'desconocido';\nconst ejecucionId = e.execution?.id ?? null;\n\nfunction clasificar(msg) {\n  const m = String(msg).toLowerCase();\n\n  // Fallos de credencial o permisos: no se arreglan solos.\n  if (/401|403|unauthorized|forbidden|invalid.*(api key|token|credential)/.test(m)) {\n    return { tipo: 'configuracion', severidad: 'critica', avisar: true };\n  }\n  // Cuotas y cortes de red: el reintero del nodo ya lo intentó.\n  if (/429|rate.?limit|etimedout|econnreset|econnrefused|socket hang up|503|502|504/.test(m)) {\n    return { tipo: 'transitorio', severidad: 'baja', avisar: false };\n  }\n  // Payload que no encaja: la regla de detección de origen está mal montada.\n  if (/normalización fallida|json|parse|unexpected token|no se pudo parsear/.test(m)) {\n    return { tipo: 'datos', severidad: 'media', avisar: true };\n  }\n  return { tipo: 'desconocido', severidad: 'media', avisar: true };\n}\n\nconst clase = clasificar(mensaje);\n\nreturn [\n  {\n    json: {\n      flujo,\n      nodo,\n      mensaje: String(mensaje).slice(0, 500),\n      ejecucionId,\n      ...clase,\n      // Enlace directo a la ejecución fallida: sin esto, depurar exige buscar\n      // a mano entre miles de ejecuciones.\n      urlDepuracion: ejecucionId ? `${$env.N8N_EDITOR_BASE_URL ?? ''}execution/${ejecucionId}` : null,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "id": "wf99-classify",
+      "name": "Clasificar error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-avisar",
+              "leftValue": "={{ $json.avisar }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf99-if-avisar",
+      "name": "¿Merece aviso?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-guardia",
+          "mode": "name"
+        },
+        "text": "={{ $json.severidad === 'critica' ? '🔴 CRÍTICO' : '🟠' }} *Fallo en {{ $json.flujo }}*\n\nNodo: `{{ $json.nodo }}`\nTipo: `{{ $json.tipo }}`\n\n```{{ $json.mensaje }}```\n\n{{ $json.urlDepuracion ? '<' + $json.urlDepuracion + '|Ver ejecución>' : '' }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "wf99-slack",
+      "name": "Avisar a guardia",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        60,
+        220
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "onError": "continueRegularOutput",
+      "notes": "Si esto falla, el SOAR se ha quedado sin ningún canal de aviso. El log de n8n es la última red — de ahí que la retención de ejecuciones fallidas sea de 30 días y no de 7."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-99 · Registro silencioso de fallos transitorios.\n//\n// No se avisa, pero SÍ se cuenta. Un solo 429 de VirusTotal es rutina; cien\n// en una hora significa que la caché de IoC no está funcionando o que el\n// volumen superó lo que el free tier soporta — y eso es una decisión de\n// arquitectura, no una incidencia puntual.\n\nconst e = $input.first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'error_transitorio',\n      flujo: e.flujo,\n      nodo: e.nodo,\n      tipo: e.tipo,\n      mensaje: e.mensaje,\n      timestamp: e.timestamp,\n    },\n  },\n];"
+      },
+      "id": "wf99-log-transient",
+      "name": "Contabilizar transitorio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        400
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Clasificar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar error": {
+      "main": [
+        [
+          {
+            "node": "¿Merece aviso?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Merece aviso?": {
+      "main": [
+        [
+          {
+            "node": "Avisar a guardia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Contabilizar transitorio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 6,
+      "descripcion": "Manejador global. Distingue fallo transitorio (silencioso) de fallo de configuración (aviso inmediato) para que la guardia no se sature de ruido y no se pierda lo importante."
+    }
+  }
+}

@@ -1,0 +1,185 @@
+{
+  "name": "[BlinkSec] WF-02 - Enriquecimiento IoC - v1",
+  "nodes": [
+    {
+      "parameters": { "workflowInputs": { "values": [] } },
+      "id": "wf02-trigger",
+      "name": "Entrada desde WF-01",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-02 · Preparación de consultas y lectura de caché.\n//\n// La caché de IoC no es una optimización opcional: con el free tier de\n// VirusTotal (4 peticiones/minuto), una ráfaga de alertas de la misma botnet\n// agota la cuota en segundos. Cachear por IoC —no por alerta— hace que la\n// segunda y sucesivas alertas de la misma campaña no consuman nada.\n\n// @blinksec-inject: lib/enrich.js\n\nconst alerta = $input.first().json;\n\nconst ipPrincipal = (alerta.artifacts?.ips ?? []).find((i) => i.direction === 'src')\n  ?? (alerta.artifacts?.ips ?? [])[0];\n\n// Se prefiere SHA256 por ser el que mejor resuelve VirusTotal.\nconst hashes = alerta.artifacts?.hashes ?? [];\nconst hashPrincipal = hashes.find((h) => h.type === 'sha256') ?? hashes[0];\n\nconst consultas = [];\n\nif (ipPrincipal) {\n  consultas.push(\n    { provider: 'greynoise', iocType: 'ip', value: ipPrincipal.value, cacheKey: cacheKey('greynoise', 'ip', ipPrincipal.value) },\n    { provider: 'abuseipdb', iocType: 'ip', value: ipPrincipal.value, cacheKey: cacheKey('abuseipdb', 'ip', ipPrincipal.value) },\n    { provider: 'virustotal', iocType: 'ip', value: ipPrincipal.value, cacheKey: cacheKey('virustotal', 'ip', ipPrincipal.value) },\n  );\n}\n\nif (hashPrincipal) {\n  consultas.push(\n    { provider: 'virustotal', iocType: 'hash', value: hashPrincipal.value, cacheKey: cacheKey('virustotal', 'hash', hashPrincipal.value) },\n    { provider: 'xforce', iocType: 'hash', value: hashPrincipal.value, cacheKey: cacheKey('xforce', 'hash', hashPrincipal.value) },\n  );\n}\n\nif (ipPrincipal && !hashPrincipal) {\n  consultas.push({ provider: 'xforce', iocType: 'ip', value: ipPrincipal.value, cacheKey: cacheKey('xforce', 'ip', ipPrincipal.value) });\n}\n\nreturn [\n  {\n    json: {\n      alerta,\n      consultas,\n      enrichStartedAt: Date.now(),\n      ip: ipPrincipal?.value ?? null,\n      hash: hashPrincipal?.value ?? null,\n    },\n  },\n];"
+      },
+      "id": "wf02-plan",
+      "name": "Planificar consultas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.greynoise.io/v3/ip/{{ $json.ip }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 8000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf02-greynoise",
+      "name": "GreyNoise v3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-120, 100],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-greynoise", "name": "GreyNoise API" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput",
+      "notes": "Un solo endpoint: la v3 consolida el contexto de escáner y el conjunto RIOT que la v2 exigía en dos llamadas. Menos latencia, menos cuota, un solo punto de fallo."
+    },
+    {
+      "parameters": {
+        "url": "https://api.abuseipdb.com/api/v2/check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "ipAddress", "value": "={{ $json.ip }}" },
+            { "name": "maxAgeInDays", "value": "90" },
+            { "name": "verbose", "value": "" }
+          ]
+        },
+        "options": {
+          "timeout": 8000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf02-abuseipdb",
+      "name": "AbuseIPDB v2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-120, 250],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-abuseipdb", "name": "AbuseIPDB API" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://www.virustotal.com/api/v3/{{ $json.hash ? 'files/' + $json.hash : 'ip_addresses/' + $json.ip }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf02-virustotal",
+      "name": "VirusTotal v3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-120, 400],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-virustotal", "name": "VirusTotal API" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 20000,
+      "onError": "continueRegularOutput",
+      "notes": "waitBetweenTries 20 s: el free tier son 4 peticiones/minuto. Reintentar a los 2 s garantiza un segundo 429. El backoff debe ser mayor que la ventana de cuota."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.xforce.ibmcloud.com/{{ $json.hash ? 'malware/' + $json.hash : 'ipr/' + $json.ip }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "timeout": 8000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf02-xforce",
+      "name": "IBM X-Force",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-120, 550],
+      "credentials": { "httpBasicAuth": { "id": "blinksec-xforce", "name": "IBM X-Force API" } },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "X-Force acepta autenticación básica con API key como usuario y password como contraseña, lo que evita el flujo de token dinámico en dos pasos."
+    },
+    {
+      "parameters": { "numberInputs": 4 },
+      "id": "wf02-merge",
+      "name": "Converger respuestas",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [180, 325]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-02 · Agregación de respuestas.\n//\n// Aquí llega TODO, incluidos los proveedores que fallaron: los nodos HTTP\n// tienen neverError y onError=continueRegularOutput precisamente para que un\n// 503 de VirusTotal no aborte la ejecución y deje la alerta sin procesar.\n//\n// El resultado marca explícitamente qué se pudo consultar y qué no. Ese\n// metadato es lo que permite a WF-03 aplicar el techo de puntuación y no\n// contener a ciegas con información incompleta.\n\n// @blinksec-inject: lib/enrich.js\n\nconst plan = $('Planificar consultas').first().json;\nconst alerta = plan.alerta;\n\n// Mapa nodo → proveedor, para reconstruir el origen de cada respuesta.\nconst mapaNodos = [\n  ['GreyNoise v3', 'greynoise'],\n  ['AbuseIPDB v2', 'abuseipdb'],\n  ['VirusTotal v3', 'virustotal'],\n  ['IBM X-Force', 'xforce'],\n];\n\nconst proveedoresPlanificados = new Set(plan.consultas.map((c) => c.provider));\nconst respuestas = [];\n\nfor (const [nombreNodo, provider] of mapaNodos) {\n  if (!proveedoresPlanificados.has(provider)) continue;\n\n  let salida;\n  try {\n    salida = $(nombreNodo).first().json;\n  } catch (e) {\n    // El nodo no llegó a ejecutarse.\n    respuestas.push({ provider, statusCode: 0, body: null });\n    continue;\n  }\n\n  respuestas.push({\n    provider,\n    statusCode: salida.statusCode ?? 200,\n    body: salida.body ?? salida,\n  });\n}\n\nconst enrichment = aggregate(respuestas);\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      enrichment,\n      timings: {\n        ingestStartedAt: alerta.ingestStartedAt,\n        enrichStartedAt: plan.enrichStartedAt,\n        enrichMs: Date.now() - plan.enrichStartedAt,\n      },\n    },\n  },\n];"
+      },
+      "id": "wf02-aggregate",
+      "name": "Agregar inteligencia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 325]
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-03", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "wf02-call-triage",
+      "name": "Invocar WF-03 Triaje",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [620, 325]
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-01": {
+      "main": [[{ "node": "Planificar consultas", "type": "main", "index": 0 }]]
+    },
+    "Planificar consultas": {
+      "main": [
+        [
+          { "node": "GreyNoise v3", "type": "main", "index": 0 },
+          { "node": "AbuseIPDB v2", "type": "main", "index": 0 },
+          { "node": "VirusTotal v3", "type": "main", "index": 0 },
+          { "node": "IBM X-Force", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "GreyNoise v3": { "main": [[{ "node": "Converger respuestas", "type": "main", "index": 0 }]] },
+    "AbuseIPDB v2": { "main": [[{ "node": "Converger respuestas", "type": "main", "index": 1 }]] },
+    "VirusTotal v3": { "main": [[{ "node": "Converger respuestas", "type": "main", "index": 2 }]] },
+    "IBM X-Force": { "main": [[{ "node": "Converger respuestas", "type": "main", "index": 3 }]] },
+    "Converger respuestas": {
+      "main": [[{ "node": "Agregar inteligencia", "type": "main", "index": 0 }]]
+    },
+    "Agregar inteligencia": {
+      "main": [[{ "node": "Invocar WF-03 Triaje", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 3,
+      "descripcion": "Consulta en paralelo GreyNoise, AbuseIPDB, VirusTotal e IBM X-Force. Degrada de forma controlada: con proveedores caídos sigue produciendo veredicto y lo marca como parcial.",
+      "tests": "tests/triage/enrich.test.js"
+    }
+  }
+}

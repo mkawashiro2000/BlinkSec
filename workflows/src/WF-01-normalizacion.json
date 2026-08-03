@@ -1,0 +1,156 @@
+{
+  "name": "[BlinkSec] WF-01 - Normalizacion - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "source", "type": "string" },
+            { "name": "rawBody", "type": "string" },
+            { "name": "alertId", "type": "string" },
+            { "name": "agentId", "type": "string" },
+            { "name": "ingestStartedAt", "type": "number" }
+          ]
+        }
+      },
+      "id": "wf01-trigger",
+      "name": "Entrada desde WF-00",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-400, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-01 · Normalización al contrato interno de BlinkSec.\n//\n// Punto de desacople del sistema: a partir de aquí nada sabe de qué\n// plataforma vino la alerta. Añadir un cuarto SIEM se resuelve escribiendo un\n// normalizador en lib/normalize.js, sin tocar nada aguas abajo.\n\n// @blinksec-inject: lib/normalize.js\n\nconst entrada = $input.first().json;\n\nlet alertas;\ntry {\n  alertas = normalize(entrada.source, entrada.rawBody);\n} catch (e) {\n  // Un payload irrecuperable no se procesa a medias: se deriva a WF-99 con el\n  // contexto suficiente para que alguien arregle la regla de origen.\n  throw new Error(`Normalización fallida (${entrada.source}): ${e.message}`);\n}\n\n// Elastic puede traer varias alertas en un solo POST. Cada una recibe su\n// propio alert_id derivado, para que la idempotencia funcione por alerta y no\n// por lote: si el lote se reenvía con una alerta nueva, sólo esa se procesa.\nreturn alertas.map((a, i) => ({\n  json: {\n    ...a,\n    alert_id: alertas.length === 1 ? entrada.alertId : `${entrada.alertId}-${i}`,\n    agent_id: entrada.agentId,\n    ingestStartedAt: entrada.ingestStartedAt,\n  },\n}));"
+      },
+      "id": "wf01-normalize",
+      "name": "Normalizar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-180, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT hostname, criticality, never_isolate, owner_team\nFROM blinksec.assets\nWHERE hostname = $1\nLIMIT 1;",
+        "options": { "queryReplacement": "={{ $json.asset.host }}" }
+      },
+      "id": "wf01-lookup-asset",
+      "name": "Consultar inventario de activos",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [40, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueRegularOutput",
+      "notes": "Si esta consulta falla, el activo queda con criticality='high' (valor conservador de lib/normalize.js) y toda contención pasará por aprobación humana. Fallar hacia el lado seguro, no hacia el cómodo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-01 · Fusión del inventario de activos.\n//\n// asset.criticality es el dato que decide si una contención se ejecuta sola o\n// pasa por un humano. Sin él, el sistema no distingue aislar un portátil de\n// aislar la base de datos de producción.\n\nconst alerta = $('Normalizar').first().json;\nconst filas = $input.all().map((i) => i.json).filter((f) => f && f.hostname);\nconst activo = filas[0];\n\nif (!activo) {\n  // Activo desconocido: se mantiene el 'high' conservador y se deja\n  // constancia. Un inventario incompleto es un hallazgo operativo, no una\n  // excusa para automatizar a ciegas.\n  return [\n    {\n      json: {\n        ...alerta,\n        asset: { ...alerta.asset, criticality: 'high', never_isolate: false, inventoryHit: false },\n      },\n    },\n  ];\n}\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      asset: {\n        ...alerta.asset,\n        criticality: activo.criticality,\n        never_isolate: activo.never_isolate === true,\n        owner_team: activo.owner_team ?? null,\n        inventoryHit: true,\n      },\n    },\n  },\n];"
+      },
+      "id": "wf01-merge-asset",
+      "name": "Fusionar criticidad",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.alerts (alert_id, source, rule_id, rule_name, asset_hostname, normalized, received_at)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, now())\nON CONFLICT (alert_id) DO UPDATE SET normalized = EXCLUDED.normalized\nRETURNING alert_id, (xmax = 0) AS es_nueva;",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.source }},{{ $json.rule.id }},{{ $json.rule.name }},{{ $json.asset.host }},{{ JSON.stringify($json) }}"
+        }
+      },
+      "id": "wf01-persist",
+      "name": "Registrar alerta (UPSERT)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [480, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "notes": "UPSERT, nunca INSERT a ciegas. `xmax = 0` distingue inserción de actualización: si la alerta ya existía, es un reenvío y no debe volver a contenerse."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "cond-enriquecible",
+              "leftValue": "={{ $('Fusionar criticidad').first().json.validation.enriquecible }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf01-if-enrichable",
+      "name": "¿Tiene artefactos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-02", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "wf01-call-enrich",
+      "name": "Invocar WF-02 Enriquecimiento",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [920, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-03", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "wf01-call-triage-direct",
+      "name": "Invocar WF-03 sin enriquecer",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [920, 400],
+      "notes": "Alerta sin IP ni hash (ej. escalada de privilegios local). No hay nada que consultar a la inteligencia de amenazas; WF-03 aplica el techo 'unenrichable' y la deriva a investigación humana."
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-00": {
+      "main": [[{ "node": "Normalizar", "type": "main", "index": 0 }]]
+    },
+    "Normalizar": {
+      "main": [[{ "node": "Consultar inventario de activos", "type": "main", "index": 0 }]]
+    },
+    "Consultar inventario de activos": {
+      "main": [[{ "node": "Fusionar criticidad", "type": "main", "index": 0 }]]
+    },
+    "Fusionar criticidad": {
+      "main": [[{ "node": "Registrar alerta (UPSERT)", "type": "main", "index": 0 }]]
+    },
+    "Registrar alerta (UPSERT)": {
+      "main": [[{ "node": "¿Tiene artefactos?", "type": "main", "index": 0 }]]
+    },
+    "¿Tiene artefactos?": {
+      "main": [
+        [{ "node": "Invocar WF-02 Enriquecimiento", "type": "main", "index": 0 }],
+        [{ "node": "Invocar WF-03 sin enriquecer", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 2,
+      "descripcion": "Convierte los esquemas de Wazuh, Splunk y Elastic en el contrato interno y adjunta la criticidad del activo desde el inventario.",
+      "tests": "tests/fixtures/normalize.test.js"
+    }
+  }
+}

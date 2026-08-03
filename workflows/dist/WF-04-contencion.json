@@ -1,0 +1,404 @@
+{
+  "name": "[BlinkSec] WF-04 - Contencion - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": []
+        }
+      },
+      "id": "wf04-trigger",
+      "name": "Entrada desde WF-03",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Planificación de la contención.\n//\n// Este nodo NO ejecuta nada: decide qué acciones corresponden y construye,\n// para cada una, su reversión exacta y su caducidad. La reversión se define\n// aquí, cuando aún se tiene todo el contexto — no después, cuando alguien\n// intente deshacer un bloqueo de hace tres semanas.\n\n// ─── inyectado desde lib/containment.js — NO EDITAR AQUÍ ───\n// Editar el fichero original y recompilar: npm run build\n/**\n * BlinkSec WF-04 — Planificación de contención.\n *\n * Este módulo NO ejecuta nada: decide QUÉ acciones corresponden y construye,\n * para cada una, su acción inversa exacta. La ejecución la hacen los nodos\n * HTTP Request de n8n.\n *\n * Regla de oro del proyecto: toda acción de contención nace con su reversión\n * y su fecha de caducidad. Un SOAR que bloquea para siempre acumula, en un\n * año, miles de reglas de firewall que nadie se atreve a tocar porque nadie\n * recuerda por qué están. La reversión se construye en el momento de decidir\n * la acción — no se reconstruye después, cuando ya se perdió el contexto.\n *\n * @injectable\n */\n\n/** Duración por defecto del bloqueo, en horas, según la confianza. */\nconst TTL_HORAS = {\n  block_ip: 24,          // reevaluar al día siguiente; las IPs de botnet rotan\n  isolate_host: 4,       // un host aislado sin atención en 4 h es una escalada\n  revoke_session: 0,     // irreversible por naturaleza: no se \"des-revoca\"\n  kill_process: 0,       // idem\n};\n\nclass ContainmentPlanError extends Error {\n  constructor(message) {\n    super(message);\n    this.name = 'ContainmentPlanError';\n  }\n}\n\nfunction horasEnMs(h) {\n  return h * 3600 * 1000;\n}\n\n// ---------------------------------------------------------------------------\n// Constructores de acción\n// ---------------------------------------------------------------------------\n\n/**\n * Bloqueo de IP en el perímetro.\n *\n * El `undo_payload` guarda el identificador de la regla creada. Se rellena\n * tras la ejecución con la respuesta de la API (WF-04 hace un UPDATE sobre\n * containment_log): sin el rule_id, revertir exige buscar a ciegas entre\n * cientos de reglas.\n */\nfunction blockIp(ip, platform, ctx) {\n  const base = {\n    action_type: 'block_ip',\n    target: ip,\n    platform,\n    reversible: true,\n    ttl_hours: TTL_HORAS.block_ip,\n  };\n\n  if (platform === 'wazuh_ar') {\n    return {\n      ...base,\n      request: {\n        method: 'PUT',\n        // La API de Wazuh dispara el script de respuesta activa en los agentes.\n        path: '/active-response',\n        body: {\n          command: '!firewall-drop',\n          // Sin agents_list, Wazuh lo propaga a TODA la flota. Se acota al\n          // agente afectado salvo que se pida explícitamente lo contrario.\n          agents_list: ctx.agentId ? [ctx.agentId] : [],\n          arguments: [ip],\n        },\n      },\n      undo_payload: {\n        method: 'PUT',\n        path: '/active-response',\n        body: {\n          command: '!firewall-drop-stop',\n          agents_list: ctx.agentId ? [ctx.agentId] : [],\n          arguments: [ip],\n        },\n      },\n    };\n  }\n\n  if (platform === 'cloudflare') {\n    return {\n      ...base,\n      request: {\n        method: 'POST',\n        path: `/accounts/${ctx.accountId}/firewall/access_rules/rules`,\n        body: {\n          mode: 'block',\n          configuration: { target: 'ip', value: ip },\n          notes: `BlinkSec ${ctx.alertId} — caduca ${ctx.expiresAt}`,\n        },\n      },\n      // El id de la regla no se conoce hasta después de crearla; el flujo lo\n      // sustituye con la respuesta antes de persistir en containment_log.\n      undo_payload: {\n        method: 'DELETE',\n        path: `/accounts/${ctx.accountId}/firewall/access_rules/rules/{{RULE_ID}}`,\n        requires: ['RULE_ID'],\n      },\n    };\n  }\n\n  throw new ContainmentPlanError(`Plataforma de bloqueo de IP no soportada: ${platform}`);\n}\n\n/**\n * Aislamiento de endpoint.\n *\n * CrowdStrike mantiene un túnel cifrado hacia el host aislado para que el\n * equipo forense siga teniendo acceso: se corta la red del atacante, no la\n * investigación.\n */\nfunction isolateHost(hostId, ctx) {\n  return {\n    action_type: 'isolate_host',\n    target: hostId,\n    platform: 'crowdstrike',\n    reversible: true,\n    ttl_hours: TTL_HORAS.isolate_host,\n    request: {\n      method: 'POST',\n      path: '/devices/entities/devices-actions/v2?action_name=contain',\n      body: { ids: [hostId] },\n    },\n    undo_payload: {\n      method: 'POST',\n      path: '/devices/entities/devices-actions/v2?action_name=lift_containment',\n      body: { ids: [hostId] },\n    },\n    context: { alertId: ctx.alertId },\n  };\n}\n\n/**\n * Revocación de sesiones de identidad.\n *\n * Irreversible a propósito: \"des-revocar\" una sesión no existe ni tiene\n * sentido. El coste para el usuario legítimo es volver a autenticarse, que es\n * asumible; por eso esta acción no exige el mismo nivel de aprobación que\n * aislar un servidor.\n */\nfunction revokeSession(user, platform, ctx) {\n  const base = {\n    action_type: 'revoke_session',\n    target: user,\n    platform,\n    reversible: false,\n    ttl_hours: TTL_HORAS.revoke_session,\n    undo_payload: { note: 'No reversible: el usuario debe reautenticarse. Sin impacto permanente.' },\n    context: { alertId: ctx.alertId },\n  };\n\n  if (platform === 'entra_id') {\n    return {\n      ...base,\n      request: { method: 'POST', path: `/users/${user}/revokeSignInSessions`, body: {} },\n    };\n  }\n  if (platform === 'google_workspace') {\n    return {\n      ...base,\n      request: { method: 'POST', path: `/admin/directory/v1/users/${user}/signOut`, body: {} },\n    };\n  }\n  throw new ContainmentPlanError(`Directorio de identidad no soportado: ${platform}`);\n}\n\n// ---------------------------------------------------------------------------\n// Planificador\n// ---------------------------------------------------------------------------\n\n/**\n * Construye el plan de contención de una alerta ya triada.\n *\n * @param {object} alert     alerta normalizada\n * @param {object} verdict   salida de scoring/score.js\n * @param {object} config    { platforms: {...}, accountId, agentId, now }\n * @returns {{actions: object[], requiresApproval: boolean, skipped: string[]}}\n */\nfunction planContainment(alert, verdict, config = {}) {\n  const skipped = [];\n\n  // Nunca se contiene nada que no sea crítico. Redundante con WF-03, a\n  // propósito: es la última barrera antes de tocar producción.\n  if (verdict.verdict !== 'critical') {\n    return { actions: [], requiresApproval: false, skipped: ['veredicto_no_critico'] };\n  }\n  if (verdict.allowlisted) {\n    return { actions: [], requiresApproval: false, skipped: ['ip_en_allowlist'] };\n  }\n  if (verdict.caps?.length) {\n    // Cinturón y tirantes: si algún techo se aplicó, el veredicto no debería\n    // ser crítico. Si llega aquí, hay un bug aguas arriba — no se contiene.\n    return { actions: [], requiresApproval: true, skipped: [`techo_aplicado:${verdict.caps.join(',')}`] };\n  }\n\n  const now = config.now ?? Date.now();\n  const actions = [];\n  const ctx = {\n    alertId: alert.alert_id,\n    agentId: config.agentId ?? alert.agent_id,\n    accountId: config.accountId,\n  };\n\n  // --- Bloqueo de las IPs de origen ---------------------------------------\n  const platformIp = config.platforms?.ip ?? 'wazuh_ar';\n  for (const { value, direction } of alert.artifacts?.ips ?? []) {\n    // Sólo se bloquean IPs de origen (atacante) y destino de C2. Bloquear una\n    // IP de destino legítima cortaría un servicio propio.\n    if (!['src', 'dst'].includes(direction)) continue;\n    const expiresAt = new Date(now + horasEnMs(TTL_HORAS.block_ip)).toISOString();\n    actions.push({ ...blockIp(value, platformIp, { ...ctx, expiresAt }), expires_at: expiresAt });\n  }\n\n  // --- Aislamiento del endpoint -------------------------------------------\n  // Sólo si hay evidencia en el propio host (un hash malicioso), no por una\n  // IP atacante externa: que alguien te escanee no justifica desconectarte.\n  const hayHashMalicioso = (alert.artifacts?.hashes ?? []).length > 0;\n  if (hayHashMalicioso && config.platforms?.endpoint) {\n    if (alert.asset?.never_isolate) {\n      skipped.push('activo_marcado_never_isolate');\n    } else {\n      const expiresAt = new Date(now + horasEnMs(TTL_HORAS.isolate_host)).toISOString();\n      actions.push({ ...isolateHost(alert.asset.host, ctx), expires_at: expiresAt });\n    }\n  }\n\n  // --- Revocación de identidad --------------------------------------------\n  if (alert.identity?.user && config.platforms?.identity) {\n    const expiresAt = new Date(now + horasEnMs(1)).toISOString(); // sólo para el registro\n    actions.push({ ...revokeSession(alert.identity.user, config.platforms.identity, ctx), expires_at: expiresAt });\n  }\n\n  return {\n    actions,\n    requiresApproval: verdict.requiresApproval === true,\n    skipped,\n  };\n}\n\n/** Acciones cuya caducidad ya venció y siguen sin revertir (WF-07). */\nfunction dueForReversal(rows, now = Date.now()) {\n  return (rows ?? []).filter(\n    (r) => !r.reverted_at && r.undo_payload && new Date(r.expires_at).getTime() <= now,\n  );\n}\n\n\n// ─── fin de lib/containment.js ───\n\nconst alerta = $input.first().json;\n\nconst plan = planContainment(alerta, alerta.triage, {\n  agentId: alerta.agent_id,\n  platforms: {\n    ip: 'wazuh_ar',\n    // Se activan conforme se integran las plataformas correspondientes.\n    // endpoint: 'crowdstrike',\n    // identity: 'entra_id',\n  },\n});\n\nif (plan.actions.length === 0) {\n  return [{ json: { ...alerta, plan, sinAcciones: true } }];\n}\n\nreturn [{ json: { ...alerta, plan, sinAcciones: false } }];"
+      },
+      "id": "wf04-plan",
+      "name": "Planificar contención",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-acciones",
+              "leftValue": "={{ $json.sinAcciones }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-acciones",
+      "name": "¿Hay acciones?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-aprobacion",
+              "leftValue": "={{ $json.plan.requiresApproval }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-hitl",
+      "name": "¿Requiere aprobación?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        40,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "WF-05",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "wf04-call-hitl",
+      "name": "Invocar WF-05 Human-in-the-Loop",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        120
+      ],
+      "notes": "WF-05 suspende la ejecución en un nodo Wait hasta que un analista pulse el botón en Slack. Devuelve { aprobado: bool, aprobadoPor: string }."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-aprobado",
+              "leftValue": "={{ $json.aprobado }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-aprobado",
+      "name": "¿Aprobado por un humano?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "plan.actions",
+        "options": {
+          "destinationFieldName": "accion"
+        }
+      },
+      "id": "wf04-split",
+      "name": "Separar acciones",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://wazuh.example.com:55000/active-response",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.accion.request.body) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "wf04-execute",
+      "name": "Ejecutar contención",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        920,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-wazuh",
+          "name": "Wazuh API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.containment_log\n  (alert_id, action_type, target, platform, undo_payload, approved_by, expires_at)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz);",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.accion.action_type }},{{ $json.accion.target }},{{ $json.accion.platform }},{{ JSON.stringify($json.accion.undo_payload) }},{{ $json.aprobadoPor ?? null }},{{ $json.accion.expires_at }}"
+        }
+      },
+      "id": "wf04-log",
+      "name": "Registrar en containment_log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1140,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "notes": "Regla de oro: ninguna contención existe sin su undo_payload y su expires_at registrados. WF-07 recorre esta tabla y propone las reversiones vencidas."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "WF-06",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wf04-call-ticket",
+      "name": "Invocar WF-06 Ticketing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1360,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Registro de contención omitida.\n//\n// Que el sistema decida NO contener es información operativa de primer orden:\n// si esta rama se dispara con frecuencia, o el motor de triaje está mal\n// calibrado o el inventario de activos está incompleto. Un 'no hice nada'\n// silencioso es indistinguible de un flujo roto.\n\nconst a = $input.first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'contencion_omitida',\n      alert_id: a.alert_id,\n      motivos: a.plan?.skipped ?? [],\n      veredicto: a.triage?.verdict,\n      puntuacion: a.triage?.score,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "id": "wf04-log-skip",
+      "name": "Registrar omisión",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        40,
+        440
+      ]
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-03": {
+      "main": [
+        [
+          {
+            "node": "Planificar contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Planificar contención": {
+      "main": [
+        [
+          {
+            "node": "¿Hay acciones?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Hay acciones?": {
+      "main": [
+        [
+          {
+            "node": "¿Requiere aprobación?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar omisión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Requiere aprobación?": {
+      "main": [
+        [
+          {
+            "node": "Invocar WF-05 Human-in-the-Loop",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Separar acciones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invocar WF-05 Human-in-the-Loop": {
+      "main": [
+        [
+          {
+            "node": "¿Aprobado por un humano?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Aprobado por un humano?": {
+      "main": [
+        [
+          {
+            "node": "Separar acciones",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar omisión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Separar acciones": {
+      "main": [
+        [
+          {
+            "node": "Ejecutar contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar contención": {
+      "main": [
+        [
+          {
+            "node": "Registrar en containment_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar en containment_log": {
+      "main": [
+        [
+          {
+            "node": "Invocar WF-06 Ticketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 5,
+      "descripcion": "Ejecuta contramedidas a velocidad de máquina, con Human-in-the-Loop para activos críticos. Toda acción se registra con su reversión y caducidad.",
+      "tests": "tests/triage/containment.test.js"
+    }
+  }
+}

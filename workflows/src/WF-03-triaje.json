@@ -1,0 +1,220 @@
+{
+  "name": "[BlinkSec] WF-03 - Triaje y scoring - v1",
+  "nodes": [
+    {
+      "parameters": { "workflowInputs": { "values": [] } },
+      "id": "wf03-trigger",
+      "name": "Entrada desde WF-02",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT cidr::text AS cidr FROM blinksec.ip_allowlist;",
+        "options": {}
+      },
+      "id": "wf03-allowlist",
+      "name": "Cargar allowlist propia",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-380, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueErrorOutput",
+      "notes": "Si esta consulta falla NO se continúa: sin allowlist el sistema podría bloquear el proxy corporativo o la VPN. Es el único fallo de base de datos que detiene el flujo por completo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-03 · Puntuación y veredicto.\n//\n// El cerebro del SOAR y la parte con más capacidad de causar daño. Los pesos\n// viven en scoring/weights.json, versionados aparte, y todo veredicto emite su\n// `rationale`: un analista debe poder reconstruir por qué el sistema decidió\n// aislar un host. Un veredicto sin justificación es incauditable.\n\n// @blinksec-inject: scoring/weights.json\n// @blinksec-inject: scoring/score.js\n\nconst alerta = $('Entrada desde WF-02').first().json;\n\n// Allowlist propia. Se evalúa DENTRO de score() como puerta 0, antes de\n// cualquier aritmética de puntuación.\nconst allowlist = $input.all()\n  .map((i) => i.json.cidr)\n  .filter(Boolean);\n\nconst resultado = score(alerta, alerta.enrichment, { allowlist });\n\nconst ahora = Date.now();\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      triage: resultado,\n      timings: {\n        ...(alerta.timings ?? {}),\n        // Latencia de extremo a extremo: la métrica que importa\n        // operativamente, dominada por las APIs de inteligencia. El tiempo de\n        // cómputo del flujo es un orden de magnitud menor y se mide aparte\n        // para no confundir una cosa con la otra.\n        e2eMs: alerta.ingestStartedAt ? ahora - alerta.ingestStartedAt : null,\n        triagedAt: ahora,\n      },\n    },\n  },\n];"
+      },
+      "id": "wf03-score",
+      "name": "Puntuar y decidir",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-160, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE blinksec.alerts\nSET score = $2, verdict = $3, partial_enrichment = $4, processed_at = now()\nWHERE alert_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.triage.score }},{{ $json.triage.verdict }},{{ $json.enrichment?._meta?.partial ?? false }}"
+        }
+      },
+      "id": "wf03-persist",
+      "name": "Persistir veredicto",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [60, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-fp",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "false_positive",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Falso positivo"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-inv",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "investigate",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Investigar"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-crit",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "critical",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Crítico"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": 1 }
+      },
+      "id": "wf03-switch",
+      "name": "Bifurcar por veredicto",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [280, 300],
+      "notes": "fallbackOutput=1 (Investigar): ante un veredicto inesperado se escala a un humano, nunca se descarta ni se contiene."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://thehive.example.com/api/v1/alert/_bulk",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sourceRef: $json.alert_id, status: 'Ignored', summary: 'Cerrada automáticamente por BlinkSec: ' + ($json.triage.rationale ?? []).join('; ') }) }}",
+        "options": {
+          "timeout": 8000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf03-close-siem",
+      "name": "Cerrar alerta en SIEM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [560, 120],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-thehive", "name": "TheHive API" } },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Wazuh no tiene concepto de 'cerrar alerta': no hay estado que actualizar en el manager. El cierre se materializa marcando la alerta como Ignored en TheHive, que es donde el analista mira. Si se usa Splunk ES o Elastic, sustituir por su API de estado de notable/caso — ver docs/runbook-despliegue.md."
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-06", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "id": "wf03-call-ticket",
+      "name": "Invocar WF-06 Ticketing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [560, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-04", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "id": "wf03-call-contain",
+      "name": "Invocar WF-04 Contención",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [560, 480]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.metrics (alert_id, e2e_ms, enrich_ms, providers_ok, providers_failed)\nVALUES ($1, $2, $3, $4, $5);",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.timings?.e2eMs ?? 0 }},{{ $json.timings?.enrichMs ?? 0 }},{{ $json.enrichment?._meta?.providersOk ?? 0 }},{{ $json.enrichment?._meta?.providersFailed ?? 0 }}"
+        }
+      },
+      "id": "wf03-metrics",
+      "name": "Registrar métricas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [780, 120],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueRegularOutput",
+      "notes": "Separa e2e_ms de enrich_ms. La cifra de '1.5 s' es cómputo del flujo; lo que se percibe en el SOC es e2e_ms, dominado por las APIs externas."
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-02": {
+      "main": [[{ "node": "Cargar allowlist propia", "type": "main", "index": 0 }]]
+    },
+    "Cargar allowlist propia": {
+      "main": [[{ "node": "Puntuar y decidir", "type": "main", "index": 0 }]]
+    },
+    "Puntuar y decidir": {
+      "main": [[{ "node": "Persistir veredicto", "type": "main", "index": 0 }]]
+    },
+    "Persistir veredicto": {
+      "main": [[{ "node": "Bifurcar por veredicto", "type": "main", "index": 0 }]]
+    },
+    "Bifurcar por veredicto": {
+      "main": [
+        [{ "node": "Cerrar alerta en SIEM", "type": "main", "index": 0 }],
+        [{ "node": "Invocar WF-06 Ticketing", "type": "main", "index": 0 }],
+        [{ "node": "Invocar WF-04 Contención", "type": "main", "index": 0 }]
+      ]
+    },
+    "Cerrar alerta en SIEM": {
+      "main": [[{ "node": "Registrar métricas", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 4,
+      "descripcion": "Agrega las puntuaciones de reputación en un veredicto único y bifurca en tres vías. Aplica los techos que impiden contener con información insuficiente.",
+      "tests": "tests/triage/triage.test.js"
+    }
+  }
+}

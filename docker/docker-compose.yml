@@ -1,0 +1,170 @@
+# BlinkSec — n8n en modo queue, endurecido para uso como SOAR.
+#
+# Topología:
+#   caddy      → TLS, rate limit, allowlist de IPs del SIEM, límite de payload
+#   n8n-main   → UI + scheduler (NO expuesto a internet, sólo vía caddy /ui)
+#   n8n-webhook→ procesa únicamente peticiones de webhook (superficie pública)
+#   n8n-worker → ejecuta los jobs de la cola (escalar horizontalmente aquí)
+#   postgres   → datos de workflows y ejecuciones
+#   redis      → cola de ejecución + caché de IoC + nonces de idempotencia
+#
+# Separar webhook/worker/main es lo que permite que una ráfaga de alertas no
+# bloquee la UI ni el scheduler, y que la superficie pública no tenga acceso
+# al editor.
+
+x-n8n-common: &n8n-common
+  image: n8nio/n8n:1.72.1
+  restart: unless-stopped
+  environment: &n8n-env
+    # --- Base de datos ---
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: postgres
+    DB_POSTGRESDB_PORT: 5432
+    DB_POSTGRESDB_DATABASE: ${POSTGRES_DB}
+    DB_POSTGRESDB_USER: ${POSTGRES_USER}
+    DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+
+    # --- Modo queue ---
+    EXECUTIONS_MODE: queue
+    QUEUE_BULL_REDIS_HOST: redis
+    QUEUE_BULL_REDIS_PORT: 6379
+    QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD}
+    QUEUE_HEALTH_CHECK_ACTIVE: "true"
+
+    # --- Seguridad ---
+    N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+    N8N_SECURE_COOKIE: "true"
+    N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"   # WF-00 necesita $env para el secreto HMAC
+    # Sin esto, require('crypto') falla en el nodo Code y la verificación HMAC
+    # de WF-00 no puede ejecutarse. Se permite SÓLO crypto, nada más (fs o
+    # child_process en un sandbox de nodo Code sería ejecución arbitraria).
+    NODE_FUNCTION_ALLOW_BUILTIN: crypto
+    N8N_PAYLOAD_SIZE_MAX: 2                 # MiB — una alerta legítima nunca pesa más
+    N8N_DIAGNOSTICS_ENABLED: "false"        # sin telemetría saliente desde un SOAR
+    N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+    N8N_HIRING_BANNER_ENABLED: "false"
+    N8N_PROTOCOL: https
+    N8N_HOST: ${N8N_HOST}
+    WEBHOOK_URL: https://${N8N_HOST}/
+    N8N_EDITOR_BASE_URL: https://${N8N_HOST}/
+
+    # --- Retención de ejecuciones (privacidad / PII) ---
+    # El log de ejecución de un SOAR contiene IPs corporativas, usuarios y
+    # tokens transitorios. Se poda agresivamente desde el día 1.
+    EXECUTIONS_DATA_PRUNE: "true"
+    EXECUTIONS_DATA_MAX_AGE: 168            # 168 h = 7 d para ejecuciones exitosas
+    EXECUTIONS_DATA_PRUNE_MAX_COUNT: 25000
+    EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+    EXECUTIONS_DATA_SAVE_ON_ERROR: all
+    EXECUTIONS_DATA_SAVE_ON_PROGRESS: "false"
+    EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "false"
+
+    # --- Secretos del dominio BlinkSec, leídos por los nodos Code ---
+    BLINKSEC_HMAC_SECRET_WAZUH: ${BLINKSEC_HMAC_SECRET_WAZUH}
+    BLINKSEC_HMAC_SECRET_SPLUNK: ${BLINKSEC_HMAC_SECRET_SPLUNK}
+    BLINKSEC_HMAC_SECRET_ELASTIC: ${BLINKSEC_HMAC_SECRET_ELASTIC}
+    BLINKSEC_REPLAY_WINDOW_SECONDS: ${BLINKSEC_REPLAY_WINDOW_SECONDS:-300}
+    BLINKSEC_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    GENERIC_TIMEZONE: ${TZ:-UTC}
+    TZ: ${TZ:-UTC}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks: [blinksec]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [blinksec]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [blinksec]
+
+  n8n-main:
+    <<: *n8n-common
+    container_name: blinksec-n8n-main
+    environment:
+      <<: *n8n-env
+      N8N_DISABLE_PRODUCTION_MAIN_PROCESS: "true"  # los webhooks los sirve n8n-webhook
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ../workflows:/workflows:ro
+    expose: ["5678"]
+
+  n8n-webhook:
+    <<: *n8n-common
+    container_name: blinksec-n8n-webhook
+    command: webhook
+    volumes:
+      - n8n-data:/home/node/.n8n
+    expose: ["5678"]
+
+  n8n-worker:
+    <<: *n8n-common
+    command: worker --concurrency=10
+    volumes:
+      - n8n-data:/home/node/.n8n
+    deploy:
+      replicas: 2
+
+  caddy:
+    # Build propio: la imagen oficial no trae la directiva `rate_limit`.
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    image: blinksec/caddy:2.8-ratelimit
+    container_name: blinksec-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      N8N_HOST: ${N8N_HOST}
+      SIEM_ALLOWLIST: ${SIEM_ALLOWLIST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [n8n-main, n8n-webhook]
+    networks: [blinksec]
+
+volumes:
+  postgres-data:
+  redis-data:
+  n8n-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  blinksec:
+    driver: bridge

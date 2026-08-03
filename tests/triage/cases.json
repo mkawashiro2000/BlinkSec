@@ -1,0 +1,434 @@
+{
+  "_comment": "Corpus de triaje etiquetado a mano. Es el criterio de aceptación real de BlinkSec: un SOAR que auto-contiene falsos positivos es peor que no tener SOAR. Cada caso incluye las respuestas CRUDAS de los proveedores para que el test ejercite también el parseo de lib/enrich.js, no sólo la aritmética de puntuación.",
+  "_labels": "expected = veredicto que un analista senior daría revisando el caso a mano",
+
+  "cases": [
+    {
+      "name": "FP-01 resolutor DNS público escaneando",
+      "expected": "false_positive",
+      "note": "8.8.8.8 aparece en logs de firewall constantemente. GreyNoise lo identifica como servicio comercial.",
+      "alert": {
+        "rule": { "id": "4151", "level": 8, "name": "Multiple connection attempts" },
+        "asset": { "host": "fw-perimeter-01", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "8.8.8.8", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "business_service_intelligence": { "found": true, "name": "Google Public DNS", "trust_level": "1" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0, "numDistinctUsers": 0, "isp": "Google LLC", "countryCode": "US" } }
+        }
+      ]
+    },
+    {
+      "name": "FP-02 escáner de Shodan",
+      "expected": "false_positive",
+      "note": "Escáner de internet documentado. Genera alertas a diario en cualquier perímetro.",
+      "alert": {
+        "rule": { "id": "5710", "level": 5, "name": "Attempt to login using a non-existent user" },
+        "asset": { "host": "web-01", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "198.20.69.74", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "benign", "actor": "Shodan.io", "last_seen": "2026-08-02" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0, "numDistinctUsers": 0, "isp": "Shodan", "countryCode": "US" } }
+        }
+      ]
+    },
+    {
+      "name": "FP-03 escáner de Censys con reportes residuales",
+      "expected": "false_positive",
+      "note": "Algunos usuarios reportan a los escáneres académicos por desconocimiento; una confianza baja en AbuseIPDB no debe revertir el veredicto de GreyNoise.",
+      "alert": {
+        "rule": { "id": "31151", "level": 8, "name": "Multiple web server 400 error codes" },
+        "asset": { "host": "web-02", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "162.142.125.12", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "benign", "actor": "Censys" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 8, "totalReports": 12, "numDistinctUsers": 3, "isp": "Censys Inc" } }
+        }
+      ]
+    },
+    {
+      "name": "FP-04 IP en lista blanca de AbuseIPDB",
+      "expected": "false_positive",
+      "note": "GreyNoise no la ha observado, pero AbuseIPDB la tiene explícitamente en lista blanca.",
+      "alert": {
+        "rule": { "id": "5715", "level": 8, "name": "SSHD authentication success" },
+        "asset": { "host": "jump-01", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "140.82.121.4", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        { "provider": "greynoise", "statusCode": 404, "body": null },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0, "isWhitelisted": true, "isp": "GitHub Inc" } }
+        }
+      ]
+    },
+    {
+      "name": "FP-05 evento FIM de un backup con hash limpio",
+      "expected": "false_positive",
+      "note": "Sin IP: sólo hash. 0/74 motores. Nivel de regla bajo. Es una rotación de fichero rutinaria.",
+      "alert": {
+        "rule": { "id": "550", "level": 7, "name": "Integrity checksum changed" },
+        "asset": { "host": "backup-01", "criticality": "low" },
+        "artifacts": { "ips": [], "hashes": [{ "value": "d41d8cd98f00b204e9800998ecf8427e", "type": "md5" }] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 0, "suspicious": 0, "harmless": 12, "undetected": 62 } } } }
+        }
+      ]
+    },
+    {
+      "name": "FP-06 nodo de CDN de Cloudflare",
+      "expected": "false_positive",
+      "note": "Infraestructura de servicio comercial: el descarte más fiable que ofrece GreyNoise.",
+      "alert": {
+        "rule": { "id": "31103", "level": 8, "name": "SQL injection attempt" },
+        "asset": { "host": "web-03", "criticality": "medium" },
+        "artifacts": { "ips": [{ "value": "104.16.132.229", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "business_service_intelligence": { "found": true, "name": "Cloudflare", "trust_level": "1" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0, "isp": "Cloudflare" } }
+        }
+      ]
+    },
+    {
+      "name": "FP-07 escáner de vulnerabilidades interno",
+      "expected": "false_positive",
+      "note": "El propio Nessus del equipo de seguridad. Está en la allowlist: se descarta ANTES de puntuar. Bloquearlo dejaría al SOC sin escaneo.",
+      "allowlist": ["10.10.5.0/24"],
+      "alert": {
+        "rule": { "id": "31151", "level": 12, "name": "Multiple web server 400 error codes" },
+        "asset": { "host": "web-01", "criticality": "high" },
+        "artifacts": { "ips": [{ "value": "10.10.5.44", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": []
+    },
+    {
+      "name": "FP-08 salida de la VPN corporativa",
+      "expected": "false_positive",
+      "note": "El caso más caro de todos si se equivoca: bloquear esta IP desconecta a toda la plantilla en teletrabajo.",
+      "allowlist": ["203.0.113.0/28"],
+      "alert": {
+        "rule": { "id": "5712", "level": 10, "name": "sshd: brute force trying to get access" },
+        "asset": { "host": "app-01", "criticality": "high" },
+        "artifacts": { "ips": [{ "value": "203.0.113.7", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 92, "totalReports": 340, "numDistinctUsers": 55 } }
+        }
+      ]
+    },
+    {
+      "name": "FP-09 escáner de investigación académica",
+      "expected": "false_positive",
+      "note": "Corroborado por tres fuentes como benigno.",
+      "alert": {
+        "rule": { "id": "31101", "level": 10, "name": "Web server 400 error code" },
+        "asset": { "host": "web-02", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "167.94.138.42", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "benign", "actor": "Internet Census Group" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0 } }
+        },
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 0, "suspicious": 0, "harmless": 30, "undetected": 60 } } } }
+        }
+      ]
+    },
+    {
+      "name": "FP-10 actualización de software firmada",
+      "expected": "false_positive",
+      "note": "FIM sobre un binario tras un despliegue programado; hash conocido y limpio.",
+      "alert": {
+        "rule": { "id": "550", "level": 7, "name": "Integrity checksum changed" },
+        "asset": { "host": "app-02", "criticality": "medium" },
+        "artifacts": { "ips": [], "hashes": [{ "value": "5d41402abc4b2a76b9719d911017c592", "type": "md5" }] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 0, "suspicious": 0, "harmless": 8, "undetected": 66 } } } }
+        }
+      ]
+    },
+
+    {
+      "name": "AM-01 fuerza bruta SSH desde botnet conocida",
+      "expected": "critical",
+      "expectApproval": false,
+      "note": "Tres fuentes coinciden. Activo de baja criticidad: se contiene sin intervención humana.",
+      "alert": {
+        "rule": { "id": "5712", "level": 10, "name": "sshd: brute force trying to get access" },
+        "asset": { "host": "web-01", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "45.155.205.233", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "malicious", "actor": "unknown", "cves": ["CVE-2024-3400"] } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 100, "totalReports": 1820, "numDistinctUsers": 210, "countryCode": "RU" } }
+        },
+        { "provider": "xforce", "statusCode": 200, "body": { "score": 9, "cats": { "Scanning IPs": 90, "Botnet Command and Control Server": 70 } } }
+      ]
+    },
+    {
+      "name": "AM-02 malware conocido en servidor de base de datos",
+      "expected": "critical",
+      "expectApproval": true,
+      "note": "Activo crown_jewel: crítico, pero la contención NO se ejecuta sola. Aislar la BD de producción es un corte de servicio.",
+      "alert": {
+        "rule": { "id": "550", "level": 12, "name": "Integrity checksum changed" },
+        "asset": { "host": "db-prod-01", "criticality": "crown_jewel" },
+        "artifacts": { "ips": [], "hashes": [{ "value": "275a021bbfb6489e54d471899f7db9d1663fc695ec2fe2a2c4538aabf651fd0f", "type": "sha256" }] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": {
+            "data": {
+              "attributes": {
+                "last_analysis_stats": { "malicious": 58, "suspicious": 3, "harmless": 0, "undetected": 11 },
+                "popular_threat_classification": { "suggested_threat_label": "trojan.emotet/heodo" }
+              }
+            }
+          }
+        },
+        { "provider": "xforce", "statusCode": 200, "body": { "score": 8, "cats": { "Malware": 95 } } }
+      ]
+    },
+    {
+      "name": "AM-03 C2 hacia nodo de salida Tor",
+      "expected": "critical",
+      "expectApproval": true,
+      "note": "Activo de criticidad alta: pasa por Human-in-the-Loop pese a la evidencia contundente.",
+      "alert": {
+        "rule": { "id": "86601", "level": 12, "name": "Outbound connection to known Tor exit node" },
+        "asset": { "host": "app-prod-03", "criticality": "high" },
+        "artifacts": { "ips": [{ "value": "171.25.193.78", "direction": "dst" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "malicious", "actor": "Tor exit" } }
+        },
+        {
+          "provider": "abuseipdb",
+          "statusCode": 200,
+          "body": { "data": { "abuseConfidenceScore": 85, "totalReports": 640, "numDistinctUsers": 98 } }
+        }
+      ]
+    },
+    {
+      "name": "AM-04 IP no observada con veredictos mixtos",
+      "expected": "investigate",
+      "note": "Actividad posiblemente dirigida, pero la evidencia no es concluyente. Exactamente el caso para el que existe la vía intermedia.",
+      "alert": {
+        "rule": { "id": "31533", "level": 12, "name": "Multiple attempts to exploit vulnerability" },
+        "asset": { "host": "api-gw-01", "criticality": "high" },
+        "artifacts": { "ips": [{ "value": "91.219.236.18", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        { "provider": "greynoise", "statusCode": 404, "body": null },
+        { "provider": "abuseipdb", "statusCode": 200, "body": { "data": { "abuseConfidenceScore": 0, "totalReports": 0 } } },
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 3, "suspicious": 1, "harmless": 20, "undetected": 66 } } } }
+        }
+      ]
+    },
+    {
+      "name": "AM-05 amenaza clara pero con VirusTotal caído",
+      "expected": "investigate",
+      "note": "EL TEST MÁS IMPORTANTE DEL CORPUS. La evidencia bruta supera 100, pero AbuseIPDB devolvió 429. Con enriquecimiento parcial el techo impide la contención automática: se escala a un humano. Un proveedor caído nunca debe poder aislar un servidor.",
+      "alert": {
+        "rule": { "id": "5712", "level": 15, "name": "sshd: brute force trying to get access" },
+        "asset": { "host": "web-04", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "185.220.101.47", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "malicious", "actor": "known botnet" } }
+        },
+        { "provider": "abuseipdb", "statusCode": 429, "body": null },
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 40, "suspicious": 2, "harmless": 5, "undetected": 25 } } } }
+        }
+      ]
+    },
+    {
+      "name": "AM-06 hash de campaña de phishing",
+      "expected": "critical",
+      "expectApproval": false,
+      "note": "Detección moderada en VT (12/70) pero corroborada por X-Force. Activo de criticidad media: contención automática.",
+      "alert": {
+        "rule": { "id": "554", "level": 12, "name": "File added to the system" },
+        "asset": { "host": "lap-fin-204", "criticality": "medium" },
+        "artifacts": { "ips": [], "hashes": [{ "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "type": "sha256" }] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": {
+            "data": {
+              "attributes": {
+                "last_analysis_stats": { "malicious": 12, "suspicious": 4, "harmless": 2, "undetected": 52 },
+                "popular_threat_classification": { "suggested_threat_label": "downloader.agent" }
+              }
+            }
+          }
+        },
+        { "provider": "xforce", "statusCode": 200, "body": { "score": 7, "cats": { "Malware": 80 } } }
+      ]
+    },
+    {
+      "name": "AM-07 escáner sospechoso con reportes moderados",
+      "expected": "investigate",
+      "note": "Ni benigno ni confirmado malicioso. La zona gris que consume tiempo de analista y para la que el SOAR aporta el contexto ya masticado.",
+      "alert": {
+        "rule": { "id": "31151", "level": 8, "name": "Multiple web server 400 error codes" },
+        "asset": { "host": "web-02", "criticality": "medium" },
+        "artifacts": { "ips": [{ "value": "193.32.162.40", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "suspicious", "actor": "unknown" } }
+        },
+        { "provider": "abuseipdb", "statusCode": 200, "body": { "data": { "abuseConfidenceScore": 30, "totalReports": 45, "numDistinctUsers": 12 } } }
+      ]
+    },
+    {
+      "name": "AM-08 posible apropiación de cuenta desde IP limpia",
+      "expected": "investigate",
+      "note": "Login anómalo desde una IP sin mala reputación. La reputación de red no ayuda aquí: es un caso de comportamiento, y lo decide un humano.",
+      "alert": {
+        "rule": { "id": "60122", "level": 12, "name": "Logon from unusual geolocation" },
+        "asset": { "host": "entra-id", "criticality": "high" },
+        "artifacts": { "ips": [{ "value": "77.88.55.60", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        { "provider": "greynoise", "statusCode": 404, "body": null },
+        { "provider": "abuseipdb", "statusCode": 200, "body": { "data": { "abuseConfidenceScore": 60, "totalReports": 90, "numDistinctUsers": 20 } } },
+        {
+          "provider": "virustotal",
+          "statusCode": 200,
+          "body": { "data": { "attributes": { "last_analysis_stats": { "malicious": 0, "suspicious": 0, "harmless": 25, "undetected": 65 } } } }
+        }
+      ]
+    },
+    {
+      "name": "AM-09 escáner malicioso sobre activo prescindible",
+      "expected": "critical",
+      "expectApproval": false,
+      "note": "El caso ideal para la automatización total: evidencia sólida, impacto nulo si se bloquea.",
+      "alert": {
+        "rule": { "id": "5712", "level": 10, "name": "sshd: brute force trying to get access" },
+        "asset": { "host": "honeypot-01", "criticality": "low" },
+        "artifacts": { "ips": [{ "value": "89.248.165.35", "direction": "src" }], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": true }
+      },
+      "responses": [
+        {
+          "provider": "greynoise",
+          "statusCode": 200,
+          "body": { "internet_scanner_intelligence": { "found": true, "classification": "malicious", "actor": "mass scanner" } }
+        },
+        { "provider": "abuseipdb", "statusCode": 200, "body": { "data": { "abuseConfidenceScore": 95, "totalReports": 900, "numDistinctUsers": 150 } } },
+        { "provider": "virustotal", "statusCode": 404, "body": null }
+      ]
+    },
+    {
+      "name": "AM-10 escalada de privilegios local sin artefactos",
+      "expected": "investigate",
+      "note": "Ni IP ni hash: no hay nada que consultar a la inteligencia de amenazas. El techo 'unenrichable' evita fingir un veredicto de reputación que no existe.",
+      "alert": {
+        "rule": { "id": "5402", "level": 12, "name": "Successful sudo to ROOT executed" },
+        "asset": { "host": "db-prod-01", "criticality": "crown_jewel" },
+        "artifacts": { "ips": [], "hashes": [] },
+        "validation": { "ok": true, "enriquecible": false }
+      },
+      "responses": []
+    }
+  ]
+}

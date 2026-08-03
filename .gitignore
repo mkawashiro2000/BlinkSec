@@ -1,0 +1,23 @@
+# Secrets — never commit
+.env
+docker/.env
+*.key
+*.pem
+credentials.json
+
+# Workflow exports may contain embedded credentials if exported wrong.
+# Only the sanitized files under workflows/ are tracked; scratch exports are not.
+workflows/*.raw.json
+workflows/_export/
+
+# Runtime
+node_modules/
+data/
+postgres-data/
+redis-data/
+caddy-data/
+n8n-data/
+*.log
+
+# OS
+.DS_Store

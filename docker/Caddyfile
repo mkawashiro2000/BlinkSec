@@ -1,0 +1,92 @@
+# BlinkSec — reverse proxy endurecido delante de n8n.
+#
+# Tres decisiones importantes:
+#  1. /webhook/* (superficie pública) va a n8n-webhook, con allowlist de IPs
+#     del SIEM. La firma HMAC de WF-00 es la defensa real; la allowlist es
+#     defensa en profundidad, no sustituto.
+#  2. El editor (/) sólo es alcanzable desde la red de gestión. Un SOAR con el
+#     editor expuesto es ejecución remota de código con extra pasos.
+#  3. request_body max_size corta payloads gigantes ANTES de que n8n reserve
+#     memoria — complementa N8N_PAYLOAD_SIZE_MAX, no lo duplica.
+
+{
+	email {$ACME_EMAIL:admin@example.com}
+	servers {
+		trusted_proxies static private_ranges
+	}
+	# Requiere la imagen construida con Dockerfile.caddy (módulo caddy-ratelimit).
+	# Con la imagen oficial, este bloque impide el arranque.
+	order rate_limit before basicauth
+}
+
+{$N8N_HOST} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 2MB
+	}
+
+	# --- Superficie pública: ingesta de alertas -----------------------------
+	@webhook path /webhook/* /webhook-test/*
+	handle @webhook {
+		# Allowlist de los colectores SIEM. Ajustar SIEM_ALLOWLIST en .env.
+		@not_siem not remote_ip {$SIEM_ALLOWLIST}
+		respond @not_siem "forbidden" 403 {
+			close
+		}
+
+		# Techo de volumetría: protege contra una tormenta de alertas del SIEM
+		# (o un reenvío malicioso) que agotaría la cola y las cuotas de las
+		# APIs de inteligencia de amenazas.
+		rate_limit {
+			zone blinksec_ingest {
+				key {remote_host}
+				events 120
+				window 1m
+			}
+		}
+
+		reverse_proxy n8n-webhook:5678 {
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_timeout 30s
+			}
+		}
+	}
+
+	# --- Reanudación de Human-in-the-Loop (Slack) --------------------------
+	# Slack no tiene IP fija razonable de allowlist; aquí la defensa es que la
+	# URL de reanudación es un token de un solo uso generado por el nodo Wait.
+	@resume path /webhook-waiting/*
+	handle @resume {
+		reverse_proxy n8n-webhook:5678
+	}
+
+	# --- Editor / API: sólo red de gestión ---------------------------------
+	handle {
+		@not_mgmt not remote_ip {$MGMT_ALLOWLIST:10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}
+		respond @not_mgmt "forbidden" 403 {
+			close
+		}
+		reverse_proxy n8n-main:5678 {
+			flush_interval -1
+		}
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+		# El cuerpo nunca se registra: contiene la alerta completa con PII.
+		format json
+	}
+}

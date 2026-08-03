@@ -1,0 +1,19 @@
+{
+  "sid": "scheduler__admin__search__RMD5f1b4a2c9e8d7__at_1754126400_18",
+  "search_name": "ES - Excessive Failed Logins - Rule",
+  "app": "SplunkEnterpriseSecuritySuite",
+  "owner": "admin",
+  "results_link": "https://splunk.example.com:8000/app/search/@go?sid=scheduler__admin__search__RMD5f1b4a2c9e8d7__at_1754126400_18",
+  "result": {
+    "_time": "2026-08-02T09:20:00.000+00:00",
+    "src_ip": "185.220.101.47",
+    "dest": "vpn-gw-01",
+    "dest_ip": "203.0.113.10",
+    "user": "j.martinez",
+    "user_domain": "CORP",
+    "urgency": "high",
+    "count": "47",
+    "action": "failure",
+    "annotations.mitre_attack": ["T1110.003"]
+  }
+}

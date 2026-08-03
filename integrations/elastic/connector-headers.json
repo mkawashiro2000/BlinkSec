@@ -1,0 +1,8 @@
+{
+  "_comment": "Cabeceras del conector Webhook de Kibana. IMPORTANTE: X-BlinkSec-Signature aquí es un token estático, NO un HMAC real — Kibana no ejecuta código y no puede calcular una firma sobre el cuerpo. No protege contra manipulación del payload ni contra reenvío. Compensarlo con SIEM_ALLOWLIST estricta en el Caddyfile. Ver integrations/elastic/README.md y docs/riesgos.md.",
+
+  "Content-Type": "application/json",
+  "X-BlinkSec-Source": "elastic",
+  "X-BlinkSec-Timestamp": "{{context.date}}",
+  "X-BlinkSec-Signature": "SUSTITUIR_POR_TOKEN_ESTATICO_DE_ELASTIC"
+}

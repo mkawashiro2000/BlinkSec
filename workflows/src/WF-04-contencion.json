@@ -1,0 +1,227 @@
+{
+  "name": "[BlinkSec] WF-04 - Contencion - v1",
+  "nodes": [
+    {
+      "parameters": { "workflowInputs": { "values": [] } },
+      "id": "wf04-trigger",
+      "name": "Entrada desde WF-03",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-620, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Planificación de la contención.\n//\n// Este nodo NO ejecuta nada: decide qué acciones corresponden y construye,\n// para cada una, su reversión exacta y su caducidad. La reversión se define\n// aquí, cuando aún se tiene todo el contexto — no después, cuando alguien\n// intente deshacer un bloqueo de hace tres semanas.\n\n// @blinksec-inject: lib/containment.js\n\nconst alerta = $input.first().json;\n\nconst plan = planContainment(alerta, alerta.triage, {\n  agentId: alerta.agent_id,\n  platforms: {\n    ip: 'wazuh_ar',\n    // Se activan conforme se integran las plataformas correspondientes.\n    // endpoint: 'crowdstrike',\n    // identity: 'entra_id',\n  },\n});\n\nif (plan.actions.length === 0) {\n  return [{ json: { ...alerta, plan, sinAcciones: true } }];\n}\n\nreturn [{ json: { ...alerta, plan, sinAcciones: false } }];"
+      },
+      "id": "wf04-plan",
+      "name": "Planificar contención",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-400, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "c-acciones",
+              "leftValue": "={{ $json.sinAcciones }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-acciones",
+      "name": "¿Hay acciones?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-180, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "c-aprobacion",
+              "leftValue": "={{ $json.plan.requiresApproval }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-hitl",
+      "name": "¿Requiere aprobación?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [40, 220]
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-05", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "wf04-call-hitl",
+      "name": "Invocar WF-05 Human-in-the-Loop",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [260, 120],
+      "notes": "WF-05 suspende la ejecución en un nodo Wait hasta que un analista pulse el botón en Slack. Devuelve { aprobado: bool, aprobadoPor: string }."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "c-aprobado",
+              "leftValue": "={{ $json.aprobado }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf04-if-aprobado",
+      "name": "¿Aprobado por un humano?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [480, 120]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "plan.actions",
+        "options": { "destinationFieldName": "accion" }
+      },
+      "id": "wf04-split",
+      "name": "Separar acciones",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://wazuh.example.com:55000/active-response",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.accion.request.body) }}",
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf04-execute",
+      "name": "Ejecutar contención",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 300],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-wazuh", "name": "Wazuh API" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.containment_log\n  (alert_id, action_type, target, platform, undo_payload, approved_by, expires_at)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz);",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.accion.action_type }},{{ $json.accion.target }},{{ $json.accion.platform }},{{ JSON.stringify($json.accion.undo_payload) }},{{ $json.aprobadoPor ?? null }},{{ $json.accion.expires_at }}"
+        }
+      },
+      "id": "wf04-log",
+      "name": "Registrar en containment_log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1140, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "notes": "Regla de oro: ninguna contención existe sin su undo_payload y su expires_at registrados. WF-07 recorre esta tabla y propone las reversiones vencidas."
+    },
+    {
+      "parameters": {
+        "workflowId": { "__rl": true, "value": "WF-06", "mode": "list" },
+        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
+        "options": { "waitForSubWorkflow": false }
+      },
+      "id": "wf04-call-ticket",
+      "name": "Invocar WF-06 Ticketing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1360, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Registro de contención omitida.\n//\n// Que el sistema decida NO contener es información operativa de primer orden:\n// si esta rama se dispara con frecuencia, o el motor de triaje está mal\n// calibrado o el inventario de activos está incompleto. Un 'no hice nada'\n// silencioso es indistinguible de un flujo roto.\n\nconst a = $input.first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'contencion_omitida',\n      alert_id: a.alert_id,\n      motivos: a.plan?.skipped ?? [],\n      veredicto: a.triage?.verdict,\n      puntuacion: a.triage?.score,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "id": "wf04-log-skip",
+      "name": "Registrar omisión",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [40, 440]
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-03": {
+      "main": [[{ "node": "Planificar contención", "type": "main", "index": 0 }]]
+    },
+    "Planificar contención": {
+      "main": [[{ "node": "¿Hay acciones?", "type": "main", "index": 0 }]]
+    },
+    "¿Hay acciones?": {
+      "main": [
+        [{ "node": "¿Requiere aprobación?", "type": "main", "index": 0 }],
+        [{ "node": "Registrar omisión", "type": "main", "index": 0 }]
+      ]
+    },
+    "¿Requiere aprobación?": {
+      "main": [
+        [{ "node": "Invocar WF-05 Human-in-the-Loop", "type": "main", "index": 0 }],
+        [{ "node": "Separar acciones", "type": "main", "index": 0 }]
+      ]
+    },
+    "Invocar WF-05 Human-in-the-Loop": {
+      "main": [[{ "node": "¿Aprobado por un humano?", "type": "main", "index": 0 }]]
+    },
+    "¿Aprobado por un humano?": {
+      "main": [
+        [{ "node": "Separar acciones", "type": "main", "index": 0 }],
+        [{ "node": "Registrar omisión", "type": "main", "index": 0 }]
+      ]
+    },
+    "Separar acciones": {
+      "main": [[{ "node": "Ejecutar contención", "type": "main", "index": 0 }]]
+    },
+    "Ejecutar contención": {
+      "main": [[{ "node": "Registrar en containment_log", "type": "main", "index": 0 }]]
+    },
+    "Registrar en containment_log": {
+      "main": [[{ "node": "Invocar WF-06 Ticketing", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 5,
+      "descripcion": "Ejecuta contramedidas a velocidad de máquina, con Human-in-the-Loop para activos críticos. Toda acción se registra con su reversión y caducidad.",
+      "tests": "tests/triage/containment.test.js"
+    }
+  }
+}

@@ -1,0 +1,372 @@
+{
+  "name": "[BlinkSec] WF-03 - Triaje y scoring - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": []
+        }
+      },
+      "id": "wf03-trigger",
+      "name": "Entrada desde WF-02",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT cidr::text AS cidr FROM blinksec.ip_allowlist;",
+        "options": {}
+      },
+      "id": "wf03-allowlist",
+      "name": "Cargar allowlist propia",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -380,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Si esta consulta falla NO se continúa: sin allowlist el sistema podría bloquear el proxy corporativo o la VPN. Es el único fallo de base de datos que detiene el flujo por completo."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-03 · Puntuación y veredicto.\n//\n// El cerebro del SOAR y la parte con más capacidad de causar daño. Los pesos\n// viven en scoring/weights.json, versionados aparte, y todo veredicto emite su\n// `rationale`: un analista debe poder reconstruir por qué el sistema decidió\n// aislar un host. Un veredicto sin justificación es incauditable.\n\nconst BLINKSEC_WEIGHTS = {\n  \"_comment\": \"Pesos del motor de triaje de BlinkSec. Ajustar aquí, NUNCA en score.js: cada cambio debe re-ejecutar tests/triage/ y revisar la matriz de confusión antes de desplegarse. Un cambio de pesos es un cambio de producción.\",\n  \"version\": 3,\n\n  \"_comment_base\": \"Línea base 35 = 'alerta sin contexto: se investiga, no se contiene ni se descarta'. Consecuencia deliberada: ninguna señal aislada llega al umbral crítico (70), así que la contención automática SIEMPRE exige corroboración de al menos dos fuentes.\",\n  \"base\": 35,\n\n  \"thresholds\": {\n    \"false_positive\": 20,\n    \"critical\": 70\n  },\n\n  \"signals\": {\n    \"greynoise_business_service\": -45,\n    \"greynoise_benign_scanner\": -35,\n    \"greynoise_suspicious_scanner\": 10,\n    \"greynoise_malicious_scanner\": 30,\n    \"_comment_not_observed\": \"No aparecer en el ruido de internet es LEVEMENTE agravante (el contacto es más probablemente dirigido), pero también es lo normal en IPs domésticas o móviles. Peso pequeño a propósito.\",\n    \"greynoise_not_observed\": 5,\n\n    \"virustotal_malicious_max\": 35,\n    \"virustotal_suspicious\": 12,\n    \"virustotal_clean\": -25,\n\n    \"abuseipdb_max\": 25,\n    \"abuseipdb_clean\": -10,\n    \"abuseipdb_whitelisted\": -35,\n\n    \"xforce_malicious\": 15,\n    \"xforce_suspicious\": 6,\n\n    \"rule_level_high\": 15,\n    \"rule_level_medium\": 7,\n\n    \"asset_crown_jewel\": 10,\n    \"asset_high\": 5\n  },\n\n  \"caps\": {\n    \"_comment_partial\": \"Con enriquecimiento incompleto la puntuación no puede alcanzar el umbral crítico. Un proveedor caído no debe poder disparar el aislamiento de un servidor.\",\n    \"partial_enrichment\": 69,\n    \"_comment_unenrichable\": \"Sin artefactos que consultar no hay base para puntuar por reputación: va a investigación humana.\",\n    \"unenrichable\": 69,\n    \"_comment_single\": \"Un solo proveedor disponible es una fuente única sin corroborar.\",\n    \"single_provider\": 69\n  },\n\n  \"rule_level\": {\n    \"high_threshold\": 12,\n    \"medium_threshold\": 8\n  }\n};\n// ─── inyectado desde scoring/score.js — NO EDITAR AQUÍ ───\n// Editar el fichero original y recompilar: npm run build\n/**\n * BlinkSec WF-03 — Motor de puntuación y triaje.\n *\n * Éste es el cerebro del SOAR y, por tanto, la parte con más capacidad de\n * hacer daño. Un motor de scoring mal calibrado que auto-contiene falsos\n * positivos es peor que no tener SOAR: destruye la confianza del equipo en la\n * automatización y provoca cortes de servicio con la firma de la organización.\n *\n * Por eso:\n *   - Los pesos viven en weights.json, versionados aparte del código.\n *   - La función es pura y determinista: mismas entradas, misma salida.\n *   - Cada decisión emite su `rationale`, que se adjunta al ticket. Un analista\n *     debe poder reconstruir POR QUÉ el sistema decidió aislar un host.\n *   - Existen techos que impiden auto-contener con información insuficiente.\n *\n * @injectable\n */\n\n// El build inyecta weights.json aquí; fuera de n8n se carga del fichero.\nconst WEIGHTS = typeof BLINKSEC_WEIGHTS !== 'undefined' ? BLINKSEC_WEIGHTS : require('./weights.json');\n\nconst VERDICTS = { FALSE_POSITIVE: 'false_positive', INVESTIGATE: 'investigate', CRITICAL: 'critical' };\n\nfunction clamp(n, min, max) {\n  return Math.min(max, Math.max(min, n));\n}\n\n/**\n * Comprueba si una IP está en la allowlist propia.\n *\n * Se evalúa ANTES de cualquier puntuación, no después. Bloquear el rango del\n * proxy corporativo o del concentrador VPN es el error más caro que puede\n * cometer un SOAR: una denegación de servicio auto-infligida sobre los propios\n * empleados, ejecutada a velocidad de máquina y con permisos de administrador.\n */\nfunction isAllowlisted(ip, allowlist) {\n  if (!ip || !Array.isArray(allowlist)) return false;\n  return allowlist.some((cidr) => ipInCidr(ip, cidr));\n}\n\nfunction ipToLong(ip) {\n  const partes = String(ip).split('.');\n  if (partes.length !== 4) return null;\n  let out = 0;\n  for (const p of partes) {\n    const n = Number(p);\n    if (!Number.isInteger(n) || n < 0 || n > 255) return null;\n    out = (out << 8) + n;\n  }\n  return out >>> 0;\n}\n\nfunction ipInCidr(ip, cidr) {\n  const [base, bitsRaw] = String(cidr).split('/');\n  const bits = bitsRaw === undefined ? 32 : Number(bitsRaw);\n  const ipLong = ipToLong(ip);\n  const baseLong = ipToLong(base);\n  if (ipLong === null || baseLong === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;\n  if (bits === 0) return true;\n  const mask = (0xffffffff << (32 - bits)) >>> 0;\n  return (ipLong & mask) === (baseLong & mask);\n}\n\n// ---------------------------------------------------------------------------\n// Señales individuales\n// ---------------------------------------------------------------------------\n\nfunction scoreGreyNoise(gn, w, rationale) {\n  if (!gn?.available) return 0;\n  const s = w.signals;\n\n  if (gn.verdict === 'benign' && gn.data?.kind === 'business_service') {\n    rationale.push(`GreyNoise: servicio comercial conocido (${gn.data.name ?? 'sin nombre'}) → descarte fuerte`);\n    return s.greynoise_business_service;\n  }\n  if (gn.verdict === 'benign') {\n    rationale.push(`GreyNoise: escáner benigno documentado (${gn.data?.actor ?? 'actor desconocido'})`);\n    return s.greynoise_benign_scanner;\n  }\n  if (gn.verdict === 'malicious') {\n    rationale.push(`GreyNoise: escáner clasificado como malicioso (${gn.data?.actor ?? 'actor desconocido'})`);\n    return s.greynoise_malicious_scanner;\n  }\n  if (gn.verdict === 'suspicious') {\n    rationale.push('GreyNoise: escáner sospechoso');\n    return s.greynoise_suspicious_scanner;\n  }\n  if (gn.verdict === 'not_observed') {\n    // No aparecer en el ruido de fondo de internet es LEVEMENTE agravante: la\n    // IP no escanea indiscriminadamente, luego el contacto contigo es más\n    // probablemente dirigido. Peso pequeño: también es lo normal en IPs\n    // domésticas o de móvil.\n    rationale.push('GreyNoise: IP no observada en el ruido de internet (posible actividad dirigida)');\n    return s.greynoise_not_observed;\n  }\n  return 0;\n}\n\nfunction scoreVirusTotal(vt, w, rationale) {\n  if (!vt?.available) return 0;\n  const s = w.signals;\n\n  if (vt.verdict === 'malicious') {\n    // Escalado por proporción de motores, no binario: 40/70 motores es una\n    // señal mucho más fuerte que 5/70, que suele ser ruido heurístico.\n    const ratio = clamp(vt.data?.ratio ?? 0, 0, 1);\n    const puntos = Math.round(s.virustotal_malicious_max * clamp(ratio * 3, 0.4, 1));\n    rationale.push(\n      `VirusTotal: ${vt.data.malicious}/${vt.data.total} motores lo marcan como malicioso` +\n        (vt.data.popularName ? ` (${vt.data.popularName})` : ''),\n    );\n    return puntos;\n  }\n  if (vt.verdict === 'suspicious') {\n    rationale.push(`VirusTotal: ${vt.data.malicious}/${vt.data.total} motores — señal débil`);\n    return s.virustotal_suspicious;\n  }\n  if (vt.verdict === 'clean') {\n    rationale.push(`VirusTotal: limpio en ${vt.data.total} motores`);\n    return s.virustotal_clean;\n  }\n  // 'unknown' (no conocido por VT) no puntúa en ninguna dirección: un binario\n  // a medida es desconocido para VT precisamente por ser dirigido.\n  if (vt.verdict === 'unknown') rationale.push('VirusTotal: artefacto desconocido (sin veredicto)');\n  return 0;\n}\n\nfunction scoreAbuseIPDB(ab, w, rationale) {\n  if (!ab?.available) return 0;\n  const s = w.signals;\n\n  if (ab.data?.isWhitelisted) {\n    rationale.push('AbuseIPDB: IP en lista blanca del proveedor');\n    return s.abuseipdb_whitelisted;\n  }\n  const conf = clamp(Number(ab.data?.abuseConfidenceScore ?? 0), 0, 100);\n  if (conf === 0) {\n    // IP conocida por AbuseIPDB sin ningún reporte: evidencia débil de\n    // benignidad, no ausencia de información.\n    rationale.push('AbuseIPDB: sin reportes de abuso');\n    return s.abuseipdb_clean;\n  }\n\n  const puntos = Math.round((conf / 100) * s.abuseipdb_max);\n  rationale.push(\n    `AbuseIPDB: confianza de abuso ${conf}% con ${ab.data.totalReports} reportes de ${ab.data.distinctReporters} fuentes`,\n  );\n  return puntos;\n}\n\nfunction scoreXForce(xf, w, rationale) {\n  if (!xf?.available) return 0;\n  const s = w.signals;\n  if (xf.verdict === 'malicious') {\n    rationale.push(`IBM X-Force: riesgo ${xf.data.score}/10 (${xf.data.categories.join(', ') || 'sin categoría'})`);\n    return s.xforce_malicious;\n  }\n  if (xf.verdict === 'suspicious') {\n    rationale.push(`IBM X-Force: riesgo ${xf.data.score}/10`);\n    return s.xforce_suspicious;\n  }\n  return 0;\n}\n\nfunction scoreRuleLevel(alert, w, rationale) {\n  const nivel = Number(alert?.rule?.level ?? 0);\n  if (nivel >= w.rule_level.high_threshold) {\n    rationale.push(`Regla de detección de severidad alta (nivel ${nivel})`);\n    return w.signals.rule_level_high;\n  }\n  if (nivel >= w.rule_level.medium_threshold) {\n    rationale.push(`Regla de detección de severidad media (nivel ${nivel})`);\n    return w.signals.rule_level_medium;\n  }\n  return 0;\n}\n\nfunction scoreAsset(alert, w, rationale) {\n  const c = alert?.asset?.criticality;\n  if (c === 'crown_jewel') {\n    rationale.push('Activo clasificado como crítico para el negocio');\n    return w.signals.asset_crown_jewel;\n  }\n  if (c === 'high') {\n    rationale.push('Activo de criticidad alta');\n    return w.signals.asset_high;\n  }\n  return 0;\n}\n\n// ---------------------------------------------------------------------------\n// Función principal\n// ---------------------------------------------------------------------------\n\n/**\n * @param {object} alert       alerta normalizada (contrato de lib/normalize.js)\n * @param {object} enrichment  salida de lib/enrich.js aggregate()\n * @param {object} [options]\n * @param {string[]} [options.allowlist]  CIDRs propios\n * @param {object}   [options.weights]    override de pesos (para tests)\n * @returns {{score, verdict, requiresApproval, rationale, caps, allowlisted}}\n */\nfunction score(alert, enrichment, options = {}) {\n  const w = options.weights ?? WEIGHTS;\n  const rationale = [];\n  const capsAplicados = [];\n\n  // --- Puerta 0: allowlist propia ------------------------------------------\n  const ipsAlerta = (alert?.artifacts?.ips ?? []).map((i) => i.value);\n  const ipAllowlisted = ipsAlerta.find((ip) => isAllowlisted(ip, options.allowlist ?? []));\n  if (ipAllowlisted) {\n    return {\n      score: 0,\n      verdict: VERDICTS.FALSE_POSITIVE,\n      requiresApproval: false,\n      allowlisted: true,\n      rationale: [`IP ${ipAllowlisted} pertenece a un rango propio en la allowlist — nunca se contiene`],\n      caps: ['allowlist'],\n      weightsVersion: w.version,\n    };\n  }\n\n  // --- Suma de señales ------------------------------------------------------\n  // Línea base: \"alerta sin contexto → se investiga\". Deliberadamente por\n  // debajo del punto medio, de modo que ninguna señal aislada alcance el\n  // umbral crítico: la contención automática exige siempre corroboración.\n  let bruto = w.base ?? 35;\n  rationale.push(`Línea base sin contexto: ${bruto}`);\n\n  bruto += scoreGreyNoise(enrichment?.greynoise, w, rationale);\n  bruto += scoreVirusTotal(enrichment?.virustotal, w, rationale);\n  bruto += scoreAbuseIPDB(enrichment?.abuseipdb, w, rationale);\n  bruto += scoreXForce(enrichment?.xforce, w, rationale);\n  bruto += scoreRuleLevel(alert, w, rationale);\n  bruto += scoreAsset(alert, w, rationale);\n\n  let puntuacion = clamp(Math.round(bruto), 0, 100);\n\n  // --- Techos de seguridad --------------------------------------------------\n  // Estos NO son ajustes finos: son la diferencia entre un sistema que escala\n  // cuando duda y uno que actúa a ciegas.\n  const meta = enrichment?._meta ?? {};\n\n  if (meta.partial) {\n    if (puntuacion > w.caps.partial_enrichment) {\n      puntuacion = w.caps.partial_enrichment;\n      rationale.push(\n        `TECHO: enriquecimiento parcial (caídos: ${(meta.failed ?? []).join(', ')}) — no se permite contención automática`,\n      );\n      capsAplicados.push('partial_enrichment');\n    }\n  }\n\n  if (alert?.validation?.enriquecible === false) {\n    if (puntuacion > w.caps.unenrichable) {\n      puntuacion = w.caps.unenrichable;\n      rationale.push('TECHO: alerta sin artefactos consultables — requiere análisis humano');\n      capsAplicados.push('unenrichable');\n    }\n  }\n\n  if ((meta.providersOk ?? 0) === 1 && puntuacion > w.caps.single_provider) {\n    puntuacion = w.caps.single_provider;\n    rationale.push('TECHO: un solo proveedor de inteligencia disponible — fuente única sin corroborar');\n    capsAplicados.push('single_provider');\n  }\n\n  // --- Veredicto ------------------------------------------------------------\n  let verdict;\n  if (puntuacion < w.thresholds.false_positive) verdict = VERDICTS.FALSE_POSITIVE;\n  else if (puntuacion > w.thresholds.critical) verdict = VERDICTS.CRITICAL;\n  else verdict = VERDICTS.INVESTIGATE;\n\n  // --- ¿Necesita aprobación humana? ----------------------------------------\n  // Sólo aplica a los casos críticos; los demás no contienen nada.\n  const criticidad = alert?.asset?.criticality;\n  const neverIsolate = alert?.asset?.never_isolate === true;\n  const requiresApproval =\n    verdict === VERDICTS.CRITICAL && (neverIsolate || criticidad === 'crown_jewel' || criticidad === 'high');\n\n  if (requiresApproval) {\n    rationale.push(\n      neverIsolate\n        ? 'Activo marcado never_isolate: la contención exige aprobación humana explícita'\n        : `Activo de criticidad \"${criticidad}\": la contención pasa por Human-in-the-Loop`,\n    );\n  }\n\n  return {\n    score: puntuacion,\n    verdict,\n    requiresApproval,\n    allowlisted: false,\n    rationale,\n    caps: capsAplicados,\n    weightsVersion: w.version,\n  };\n}\n\n\n// ─── fin de scoring/score.js ───\n\nconst alerta = $('Entrada desde WF-02').first().json;\n\n// Allowlist propia. Se evalúa DENTRO de score() como puerta 0, antes de\n// cualquier aritmética de puntuación.\nconst allowlist = $input.all()\n  .map((i) => i.json.cidr)\n  .filter(Boolean);\n\nconst resultado = score(alerta, alerta.enrichment, { allowlist });\n\nconst ahora = Date.now();\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      triage: resultado,\n      timings: {\n        ...(alerta.timings ?? {}),\n        // Latencia de extremo a extremo: la métrica que importa\n        // operativamente, dominada por las APIs de inteligencia. El tiempo de\n        // cómputo del flujo es un orden de magnitud menor y se mide aparte\n        // para no confundir una cosa con la otra.\n        e2eMs: alerta.ingestStartedAt ? ahora - alerta.ingestStartedAt : null,\n        triagedAt: ahora,\n      },\n    },\n  },\n];"
+      },
+      "id": "wf03-score",
+      "name": "Puntuar y decidir",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE blinksec.alerts\nSET score = $2, verdict = $3, partial_enrichment = $4, processed_at = now()\nWHERE alert_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.triage.score }},{{ $json.triage.verdict }},{{ $json.enrichment?._meta?.partial ?? false }}"
+        }
+      },
+      "id": "wf03-persist",
+      "name": "Persistir veredicto",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        60,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-fp",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "false_positive",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Falso positivo"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-inv",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "investigate",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Investigar"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-crit",
+                    "leftValue": "={{ $json.triage.verdict }}",
+                    "rightValue": "critical",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Crítico"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 1
+        }
+      },
+      "id": "wf03-switch",
+      "name": "Bifurcar por veredicto",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        280,
+        300
+      ],
+      "notes": "fallbackOutput=1 (Investigar): ante un veredicto inesperado se escala a un humano, nunca se descarta ni se contiene."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://thehive.example.com/api/v1/alert/_bulk",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ sourceRef: $json.alert_id, status: 'Ignored', summary: 'Cerrada automáticamente por BlinkSec: ' + ($json.triage.rationale ?? []).join('; ') }) }}",
+        "options": {
+          "timeout": 8000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "wf03-close-siem",
+      "name": "Cerrar alerta en SIEM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        120
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-thehive",
+          "name": "TheHive API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Wazuh no tiene concepto de 'cerrar alerta': no hay estado que actualizar en el manager. El cierre se materializa marcando la alerta como Ignored en TheHive, que es donde el analista mira. Si se usa Splunk ES o Elastic, sustituir por su API de estado de notable/caso — ver docs/runbook-despliegue.md."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "WF-06",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wf03-call-ticket",
+      "name": "Invocar WF-06 Ticketing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "WF-04",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wf03-call-contain",
+      "name": "Invocar WF-04 Contención",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.metrics (alert_id, e2e_ms, enrich_ms, providers_ok, providers_failed)\nVALUES ($1, $2, $3, $4, $5);",
+        "options": {
+          "queryReplacement": "={{ $json.alert_id }},{{ $json.timings?.e2eMs ?? 0 }},{{ $json.timings?.enrichMs ?? 0 }},{{ $json.enrichment?._meta?.providersOk ?? 0 }},{{ $json.enrichment?._meta?.providersFailed ?? 0 }}"
+        }
+      },
+      "id": "wf03-metrics",
+      "name": "Registrar métricas",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        780,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Separa e2e_ms de enrich_ms. La cifra de '1.5 s' es cómputo del flujo; lo que se percibe en el SOC es e2e_ms, dominado por las APIs externas."
+    }
+  ],
+  "connections": {
+    "Entrada desde WF-02": {
+      "main": [
+        [
+          {
+            "node": "Cargar allowlist propia",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cargar allowlist propia": {
+      "main": [
+        [
+          {
+            "node": "Puntuar y decidir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Puntuar y decidir": {
+      "main": [
+        [
+          {
+            "node": "Persistir veredicto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persistir veredicto": {
+      "main": [
+        [
+          {
+            "node": "Bifurcar por veredicto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bifurcar por veredicto": {
+      "main": [
+        [
+          {
+            "node": "Cerrar alerta en SIEM",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invocar WF-06 Ticketing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invocar WF-04 Contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cerrar alerta en SIEM": {
+      "main": [
+        [
+          {
+            "node": "Registrar métricas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 4,
+      "descripcion": "Agrega las puntuaciones de reputación en un veredicto único y bifurca en tres vías. Aplica los techos que impiden contener con información insuficiente.",
+      "tests": "tests/triage/triage.test.js"
+    }
+  }
+}

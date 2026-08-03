@@ -1,0 +1,158 @@
+{
+  "name": "[BlinkSec] WF-06 - Ticketing y notificacion - v1",
+  "nodes": [
+    {
+      "parameters": { "workflowInputs": { "values": [] } },
+      "id": "wf06-trigger",
+      "name": "Entrada",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-600, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-06 · Composición del ticket y saneado de PII.\n//\n// Dos responsabilidades:\n//\n//  1. CADENA DE CUSTODIA. El ticket debe permitir reconstruir la decisión\n//     meses después, cuando nadie recuerde el incidente: qué se detectó, qué\n//     dijo cada proveedor, qué puntuó el motor, qué se ejecutó y quién lo\n//     aprobó.\n//\n//  2. SANEADO. El SOAR maneja PII de empleados y claves transitorias. Lo que\n//     se escribe en un ticket sale del perímetro del SOC hacia una plataforma\n//     que ve mucha más gente. Se recorta antes de escribir, no después.\n\nconst a = $input.first().json;\nconst t = a.triage ?? {};\nconst e = a.enrichment ?? {};\n\n// Campos que nunca viajan al ticket: el log crudo puede contener credenciales\n// en claro, rutas de usuario y contenido de ficheros.\nfunction sanear(obj) {\n  if (!obj || typeof obj !== 'object') return obj;\n  const prohibidos = ['raw', 'full_log', 'rawBody', 'password', 'token', 'api_key', 'secret'];\n  const salida = Array.isArray(obj) ? [] : {};\n  for (const [k, v] of Object.entries(obj)) {\n    if (prohibidos.includes(k)) continue;\n    salida[k] = v && typeof v === 'object' ? sanear(v) : v;\n  }\n  return salida;\n}\n\nconst severidad = { false_positive: 1, investigate: 2, critical: 3 }[t.verdict] ?? 2;\n\nconst resumenProveedores = Object.entries(e)\n  .filter(([k]) => k !== '_meta')\n  .map(([nombre, r]) => {\n    if (!r.available) return `- ${nombre}: NO DISPONIBLE (${r.error})`;\n    return `- ${nombre}: ${r.verdict}`;\n  })\n  .join('\\n');\n\nconst acciones = (a.plan?.actions ?? [])\n  .map((ac) => `- ${ac.action_type} sobre ${ac.target} vía ${ac.platform} (caduca ${ac.expires_at})`)\n  .join('\\n') || '- ninguna';\n\nconst descripcion = [\n  `## Detección`,\n  `Origen: ${a.source} · Regla ${a.rule?.id} — ${a.rule?.name} (nivel ${a.rule?.level})`,\n  `Activo: ${a.asset?.host} (criticidad: ${a.asset?.criticality})`,\n  a.identity?.user ? `Usuario: ${a.identity.user}` : null,\n  ``,\n  `## Veredicto`,\n  `Puntuación: ${t.score}/100 → **${t.verdict}**`,\n  t.caps?.length ? `Techos aplicados: ${t.caps.join(', ')}` : null,\n  ``,\n  `### Por qué`,\n  ...(t.rationale ?? []).map((r) => `- ${r}`),\n  ``,\n  `## Inteligencia de amenazas`,\n  resumenProveedores,\n  e._meta?.partial ? `\\n⚠️ Enriquecimiento PARCIAL. Caídos: ${e._meta.failed.join(', ')}` : null,\n  ``,\n  `## Contención`,\n  acciones,\n  a.aprobadoPor ? `\\nAprobado por: ${a.aprobadoPor}` : null,\n  a.plan?.skipped?.length ? `\\nOmitida por: ${a.plan.skipped.join(', ')}` : null,\n  ``,\n  `---`,\n  `alert_id: ${a.alert_id} · pesos v${t.weightsVersion} · latencia e2e ${a.timings?.e2eMs ?? '?'} ms`,\n]\n  .filter((l) => l !== null)\n  .join('\\n');\n\nreturn [\n  {\n    json: {\n      alert_id: a.alert_id,\n      titulo: `[BlinkSec] ${a.rule?.name ?? 'Alerta'} — ${a.asset?.host ?? 'host desconocido'}`,\n      descripcion,\n      severidad,\n      verdict: t.verdict,\n      score: t.score,\n      tags: [a.source, a.rule?.id, t.verdict, ...(a.rule?.mitre ?? [])].filter(Boolean),\n      observables: [\n        ...(a.artifacts?.ips ?? []).map((i) => ({ dataType: 'ip', data: i.value })),\n        ...(a.artifacts?.hashes ?? []).map((h) => ({ dataType: 'hash', data: h.value })),\n      ],\n      alertaSaneada: sanear(a),\n    },\n  },\n];"
+      },
+      "id": "wf06-compose",
+      "name": "Componer ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-380, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ticket_ref FROM blinksec.alerts WHERE alert_id = $1 AND ticket_ref IS NOT NULL;",
+        "options": { "queryReplacement": "={{ $json.alert_id }}" }
+      },
+      "id": "wf06-check-existing",
+      "name": "¿Ya tiene ticket?",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-160, 300],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true,
+      "notes": "Idempotencia de ticketing. Sin esta comprobación, una alerta reenviada abre un segundo ticket — y en una tormenta de alertas el SOC acaba con cientos de duplicados que tapan los incidentes reales."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "version": 2 },
+          "conditions": [
+            {
+              "id": "c-nuevo",
+              "leftValue": "={{ $json.ticket_ref }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notExists", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf06-if-nuevo",
+      "name": "¿Ticket nuevo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [60, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://thehive.example.com/api/v1/alert",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'blinksec', source: $('Componer ticket').first().json.alertaSaneada.source, sourceRef: $('Componer ticket').first().json.alert_id, title: $('Componer ticket').first().json.titulo, description: $('Componer ticket').first().json.descripcion, severity: $('Componer ticket').first().json.severidad, tags: $('Componer ticket').first().json.tags, observables: $('Componer ticket').first().json.observables }) }}",
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "fullResponse": true, "neverError": true } }
+        }
+      },
+      "id": "wf06-thehive",
+      "name": "Crear alerta en TheHive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 220],
+      "credentials": { "httpHeaderAuth": { "id": "blinksec-thehive", "name": "TheHive API" } },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "notes": "sourceRef = alert_id: TheHive deduplica por ese campo, lo que da una segunda capa de idempotencia independiente de nuestra base de datos."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE blinksec.alerts SET ticket_ref = $2 WHERE alert_id = $1;",
+        "options": {
+          "queryReplacement": "={{ $('Componer ticket').first().json.alert_id }},{{ $json.body?._id ?? 'sin-referencia' }}"
+        }
+      },
+      "id": "wf06-save-ref",
+      "name": "Guardar referencia",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [500, 220],
+      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-06 · Rama de contingencia del ticketing.\n//\n// Si TheHive está caído, la contención YA se ejecutó: la amenaza está\n// neutralizada y lo que falta es el registro. Perder ese registro por una\n// caída de la plataforma de tickets sería inaceptable, así que se deposita en\n// un repositorio estático para reproceso posterior.\n//\n// Nunca se interrumpe el flujo por un fallo de ticketing: el orden de\n// prioridades es contener > registrar > notificar.\n\nconst t = $('Componer ticket').first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'ticket_fallido',\n      alert_id: t.alert_id,\n      titulo: t.titulo,\n      descripcion: t.descripcion,\n      severidad: t.severidad,\n      motivo: $input.first().json.error?.message ?? 'plataforma de tickets no disponible',\n      reprocesable: true,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "id": "wf06-fallback",
+      "name": "Contingencia: guardar para reproceso",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [280, 420]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#soc-alerts", "mode": "name" },
+        "text": "={{ $('Componer ticket').first().json.verdict === 'critical' ? '🔴' : '🟡' }} *{{ $('Componer ticket').first().json.titulo }}*\n\nPuntuación: {{ $('Componer ticket').first().json.score }}/100 · `{{ $('Componer ticket').first().json.alert_id }}`",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "id": "wf06-notify",
+      "name": "Notificar al SOC",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [720, 300],
+      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "onError": "continueRegularOutput",
+      "notes": "Última acción del flujo y la menos crítica. onError=continue: no notificar es molesto; abortar el flujo aquí borraría la traza de todo lo anterior."
+    }
+  ],
+  "connections": {
+    "Entrada": { "main": [[{ "node": "Componer ticket", "type": "main", "index": 0 }]] },
+    "Componer ticket": { "main": [[{ "node": "¿Ya tiene ticket?", "type": "main", "index": 0 }]] },
+    "¿Ya tiene ticket?": { "main": [[{ "node": "¿Ticket nuevo?", "type": "main", "index": 0 }]] },
+    "¿Ticket nuevo?": {
+      "main": [[{ "node": "Crear alerta en TheHive", "type": "main", "index": 0 }], []]
+    },
+    "Crear alerta en TheHive": {
+      "main": [
+        [{ "node": "Guardar referencia", "type": "main", "index": 0 }],
+        [{ "node": "Contingencia: guardar para reproceso", "type": "main", "index": 0 }]
+      ]
+    },
+    "Guardar referencia": { "main": [[{ "node": "Notificar al SOC", "type": "main", "index": 0 }]] },
+    "Contingencia: guardar para reproceso": {
+      "main": [[{ "node": "Notificar al SOC", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "WF-99"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 6,
+      "descripcion": "Crea el ticket con la cadena de custodia completa y notifica al SOC. Idempotente por alert_id y con rama de contingencia si la plataforma de tickets cae."
+    }
+  }
+}

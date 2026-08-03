@@ -1,0 +1,79 @@
+<!--
+  BlinkSec — bloque de integración para /var/ossec/etc/ossec.conf
+
+  Se inserta DENTRO de <ossec_config>, y después hay que reiniciar el manager:
+      systemctl restart wazuh-manager
+
+  Instalación del wrapper (el nombre NO lleva extensión: Wazuh busca el
+  ejecutable por el valor de <name> precedido de "custom-"):
+
+      cp custom-n8n.py /var/ossec/integrations/custom-n8n
+      chown root:wazuh /var/ossec/integrations/custom-n8n
+      chmod 750       /var/ossec/integrations/custom-n8n
+
+  Wazuh invoca:  custom-n8n <ruta_alerta.json> <api_key> <hook_url>
+  De ahí que <api_key> transporte el secreto HMAC: es el único canal que el
+  bloque <integration> ofrece para pasar un secreto al script.
+-->
+
+<integration>
+  <name>custom-n8n</name>
+
+  <!-- URL del webhook de producción de n8n (WF-00). -->
+  <hook_url>https://soar.example.com/webhook/blinksec/ingest</hook_url>
+
+  <!--
+    Secreto HMAC compartido. Debe coincidir EXACTAMENTE con
+    BLINKSEC_HMAC_SECRET_WAZUH en el .env de n8n.
+    Generar con: openssl rand -hex 32
+  -->
+  <api_key>SUSTITUIR_POR_EL_SECRETO_HMAC</api_key>
+
+  <alert_format>json</alert_format>
+
+  <!--
+    Primer filtro, del lado de Wazuh. El wrapper aplica un segundo umbral
+    (NIVEL_MINIMO) a propósito: si alguien afloja este valor sin revisar el
+    impacto, el suelo del script sigue protegiendo las cuotas de las APIs de
+    inteligencia y la cola de n8n.
+  -->
+  <level>7</level>
+
+  <!--
+    Grupos de interés. Sin este filtro, un manager con cientos de agentes
+    satura el webhook con eventos rutinarios que el SOAR sólo va a descartar.
+  -->
+  <group>authentication_failures,attack,web_attack,syscheck,rootcheck,sca,intrusion_detection</group>
+
+  <options>{"timeout": 10}</options>
+</integration>
+
+<!--
+  Comandos de respuesta activa usados por WF-04 a través de la API de Wazuh.
+  firewall-drop viene de serie en Wazuh; se declara aquí explícitamente para
+  fijar el timeout y dejar constancia de qué puede disparar el SOAR.
+-->
+
+<command>
+  <name>blinksec-firewall-drop</name>
+  <executable>firewall-drop</executable>
+  <timeout_allowed>yes</timeout_allowed>
+</command>
+
+<active-response>
+  <command>blinksec-firewall-drop</command>
+  <location>local</location>
+  <!--
+    600 s = 10 min de bloqueo a nivel de agente. NO es el TTL real de la
+    contención: el registro duradero y la reversión los gestiona BlinkSec en
+    la tabla containment_log. Este timeout es una red de seguridad para que un
+    fallo del SOAR no deje una regla de iptables huérfana para siempre.
+  -->
+  <timeout>600</timeout>
+  <!--
+    Sin <rules_id> ni <level>: esta respuesta activa NO se dispara sola por
+    reglas. La invoca exclusivamente el SOAR vía API, tras el triaje. Es lo que
+    impide que Wazuh bloquee por su cuenta, sin enriquecimiento ni allowlist.
+  -->
+  <disabled>no</disabled>
+</active-response>

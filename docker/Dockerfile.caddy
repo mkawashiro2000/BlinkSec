@@ -1,0 +1,11 @@
+# Caddy no incluye rate limiting en el build estándar: la directiva `rate_limit`
+# viene del módulo mholt/caddy-ratelimit y exige recompilar con xcaddy.
+# Sin esto, el bloque `rate_limit` del Caddyfile hace que Caddy falle al
+# arrancar con "unrecognized directive" — por eso el compose usa esta imagen.
+FROM caddy:2.8-builder-alpine AS builder
+
+RUN xcaddy build \
+    --with github.com/mholt/caddy-ratelimit@v0.1.0
+
+FROM caddy:2.8-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

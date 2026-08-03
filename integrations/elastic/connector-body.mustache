@@ -1,0 +1,24 @@
+{
+  "context": {
+    "@timestamp": "{{context.rule.executionId}}",
+    "rule": {
+      "id": "{{context.rule.id}}",
+      "name": "{{context.rule.name}}",
+      "severity": "{{context.rule.severity}}",
+      "threat": { "technique": { "id": {{context.rule.threat.technique.id.asJSON}} } }
+    },
+    "host": {
+      "name": "{{context.alerts.0.host.name}}",
+      "ip": "{{context.alerts.0.host.ip}}"
+    },
+    "user": {
+      "name": "{{context.alerts.0.user.name}}",
+      "domain": "{{context.alerts.0.user.domain}}"
+    },
+    "source": { "ip": "{{context.alerts.0.source.ip}}" },
+    "destination": { "ip": "{{context.alerts.0.destination.ip}}" },
+    "process": { "hash": { "sha256": "{{context.alerts.0.process.hash.sha256}}" } },
+    "file": { "hash": { "sha256": "{{context.alerts.0.file.hash.sha256}}" } }
+  },
+  "all_alerts": {{context.alerts.asJSON}}
+}
