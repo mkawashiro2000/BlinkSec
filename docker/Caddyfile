@@ -8,7 +8,6 @@
 #     editor expuesto es ejecución remota de código con extra pasos.
 #  3. request_body max_size corta payloads gigantes ANTES de que n8n reserve
 #     memoria — complementa N8N_PAYLOAD_SIZE_MAX, no lo duplica.
-
 {
 	email {$ACME_EMAIL:admin@example.com}
 	servers {
@@ -19,7 +18,7 @@
 	order rate_limit before basicauth
 }
 
-{$N8N_HOST} {
+(rutas_blinksec) {
 	encode zstd gzip
 
 	header {
@@ -89,4 +88,52 @@
 		# El cuerpo nunca se registra: contiene la alerta completa con PII.
 		format json
 	}
+}
+
+# {$N8N_HOST} y ":443" van en el MISMO bloque, no en dos separados.
+#
+# Se probó primero con dos bloques de sitio distintos (uno nombrado con
+# automatic HTTPS/ACME real, otro ":443" de respaldo con "tls internal"): al
+# compartir puerto, Caddy fusiona ambas definiciones en un solo servidor
+# interno, y sólo sobrevivía la política TLS del bloque nombrado. El bloque
+# de respaldo quedaba, en la práctica, sin efecto — el síntoma era idéntico
+# al fallo original: acceder por IP (Tailscale, LAN) seguía cortando el
+# handshake de TLS con "internal error" antes de llegar a ningún "handle",
+# así que ni siquiera se llegaba a evaluar MGMT_ALLOWLIST. "No abría nada" en
+# el navegador, sin ningún aviso de certificado.
+#
+# Con un único bloque que acepta CUALQUIER SNI (nombre o IP) y usa "tls
+# internal" para todos, el problema desaparece. El control de acceso real
+# (SIEM_ALLOWLIST, MGMT_ALLOWLIST) vive dentro de "rutas_blinksec" y no
+# depende de qué nombre se usó para llegar, así que esto no debilita nada.
+#
+# Contrapartida a tener presente en un despliegue con dominio público real:
+# "tls internal" nunca pide un certificado ACME de verdad (Let's Encrypt).
+# Si N8N_HOST llega a ser un dominio público de cara a internet y se
+# necesita un certificado válido reconocido por navegadores externos —no
+# sólo por la CA local de Caddy—, quitar "tls internal" de este bloque y
+# dejar sólo "{$N8N_HOST} { import rutas_blinksec }"; el acceso por IP/VPN
+# dejará de tener certificado propio, pero ya no hace falta si el acceso de
+# gestión pasa a hacerse siempre por el dominio real.
+:443 {
+	# on_demand es imprescindible: sin él, "tls internal" sólo emite
+	# certificado para los nombres declarados explícitamente y sigue
+	# cortando el handshake con "internal error" para cualquier otro SNI —
+	# incluida una IP. Con on_demand, Caddy emite un certificado nuevo al
+	# vuelo, con su CA local, para cualquier nombre que se le presente.
+	#
+	# N8N_HOST NO se incluye en la dirección de este bloque a propósito:
+	# hacerlo junto con on_demand produce "hostname appears in more than one
+	# automation policy" (Caddy no arranca) porque ese nombre quedaría
+	# cubierto a la vez por una política explícita y por la de on_demand.
+	# on_demand ya emite certificado para CUALQUIER nombre, N8N_HOST incluido,
+	# así que no hace falta declararlo aparte.
+	tls internal {
+		on_demand
+	}
+	import rutas_blinksec
+}
+
+:80 {
+	redir https://{host}{uri} permanent
 }
