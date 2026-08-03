@@ -60,19 +60,72 @@ test('greynoise: extrae los metadatos v3 para el ticket', () => {
   assert.deepEqual(r.data.cves, ['CVE-2024-3400']);
 });
 
-test('greynoise: acepta los nombres de campo heredados de la v2', () => {
-  // Compatibilidad durante la migración v2→v3: `riot` y `noise` en vez de los
-  // nombres largos de la v3.
-  const riot = parseGreyNoise({ riot: { found: true, name: 'Cloudflare', trust_level: '1' } });
-  assert.equal(riot.verdict, 'benign');
-  const noise = parseGreyNoise({ noise: { found: true, classification: 'malicious' } });
-  assert.equal(noise.verdict, 'malicious');
-});
-
 test('greynoise: un 503 se marca no disponible', () => {
   const r = parseGreyNoise(null, 503);
   assert.equal(r.available, false);
   assert.match(r.error, /503/);
+});
+
+// ---------------------------------------------------------------------------
+// GreyNoise — Community API (/v3/community/{ip}, nivel gratuito)
+//
+// Respuesta plana: { ip, noise, riot, classification, name, link, last_seen,
+// message } — nada que ver con la forma anidada del tier de pago. El
+// dispatcher de parseGreyNoise() detecta cuál llegó por la ausencia de
+// internet_scanner_intelligence / business_service_intelligence.
+// ---------------------------------------------------------------------------
+
+test('greynoise community: riot=true es un servicio comercial benigno', () => {
+  // Ejemplo real de la documentación de GreyNoise: 1.2.3.4 -> Cloudflare.
+  const r = parseGreyNoise({
+    ip: '1.2.3.4',
+    noise: false,
+    riot: true,
+    classification: 'benign',
+    name: 'Cloudflare',
+    link: 'https://viz.greynoise.io/riot/1.2.3.4',
+    last_seen: '2020-01-01',
+    message: 'Success',
+  });
+  assert.equal(r.verdict, 'benign');
+  assert.equal(r.data.kind, 'business_service');
+  assert.equal(r.data.name, 'Cloudflare');
+  assert.equal(r.data.limited, true);
+});
+
+test('greynoise community: noise=true con classification malicious', () => {
+  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'malicious' });
+  assert.equal(r.verdict, 'malicious');
+  assert.equal(r.data.kind, 'internet_scanner');
+});
+
+test('greynoise community: noise=true con classification benign', () => {
+  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'benign' });
+  assert.equal(r.verdict, 'benign');
+  assert.equal(r.data.kind, 'internet_scanner');
+});
+
+test('greynoise community: ni riot ni noise es "no observada"', () => {
+  const r = parseGreyNoise({ ip: '9.9.9.9', noise: false, riot: false, classification: 'unknown' });
+  assert.equal(r.verdict, 'not_observed');
+  assert.equal(r.data.limited, true);
+});
+
+test('greynoise community: classification desconocida cae a inconclusive, no revienta', () => {
+  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'algo-nuevo-que-anadan' });
+  assert.equal(r.verdict, 'inconclusive');
+});
+
+test('greynoise: la forma de pago y la Community nunca se confunden entre sí', () => {
+  // La detección es por la PRESENCIA de las claves anidadas, no por un flag
+  // de configuración — así, si la cuenta cambia de tier, sólo hace falta
+  // tocar la URL del nodo HTTP, nunca el código de parseo.
+  const pago = parseGreyNoise({ internet_scanner_intelligence: { found: true, classification: 'malicious' } });
+  const community = parseGreyNoise({ noise: true, riot: false, classification: 'malicious' });
+  assert.equal(pago.verdict, 'malicious');
+  assert.equal(community.verdict, 'malicious');
+  assert.equal(pago.data.limited, undefined, 'la forma de pago no debe marcarse como limitada');
+  assert.equal(community.data.limited, true);
 });
 
 // ---------------------------------------------------------------------------

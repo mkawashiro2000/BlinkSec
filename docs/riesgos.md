@@ -208,6 +208,35 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-14 · GreyNoise Community en vez de tier de pago (ACEPTADO, con adaptación de código)
+
+La cuenta real conectada es GreyNoise **Community** (nivel gratuito), no el
+tier de pago que asumía el diseño original. Dos endpoints distintos, dos
+formas de respuesta completamente distintas del mismo proveedor:
+
+| | Tier de pago (`/v3/ip/{ip}`) | Community (`/v3/community/{ip}`) |
+|---|---|---|
+| Forma | Anidada: `internet_scanner_intelligence`, `business_service_intelligence` | Plana: `{classification, riot, noise, name, link, last_seen}` |
+| Metadatos | JA4, CVEs, puertos de destino, carrier, rDNS | Ninguno |
+| Clasificaciones | `benign` / `suspicious` / `malicious` / `unknown` | `benign` / `malicious` / `unknown` — **sin `suspicious`** |
+
+**Adaptado, no bloqueado.** `lib/enrich.js` → `parseGreyNoise()` detecta cuál
+de las dos formas llegó por la PRESENCIA de las claves anidadas de pago, no
+por una variable de configuración: si la cuenta pasa a un tier de pago más
+adelante, sólo hay que cambiar la URL en el nodo HTTP de WF-02 (documentado
+en su propia nota) — el parser se adapta solo, sin tocar código ni el motor
+de scoring, que nunca sabe cuál de las dos respondió. Cubierto por
+`tests/triage/enrich.test.js`.
+
+**Riesgo residual real, no de implementación.** Con Community, GreyNoise
+nunca devuelve la clasificación intermedia `suspicious` — sólo benigno,
+malicioso o desconocido. La señal `greynoise_suspicious_scanner` (+10 en
+`scoring/weights.json`) queda, en la práctica, inalcanzable mientras la
+cuenta sea Community: no es un bug, es una pérdida de fidelidad de la fuente.
+Tampoco hay metadatos para el ticket (JA4, CVEs, puertos) que sí aportaría el
+tier de pago. No cambia ninguna propiedad de seguridad del sistema — sólo
+reduce cuánto contexto adicional aporta esta fuente en concreto.
+
 ## R-13 · Contención y Human-in-the-Loop verificados en ejecución real (CERRADO, con una limitación arquitectónica de n8n corregida)
 
 Se levantó un stack de mocks (`tools/mock-services.js`, servidor HTTP plano que

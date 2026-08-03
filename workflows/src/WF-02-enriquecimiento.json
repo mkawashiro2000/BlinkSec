@@ -32,7 +32,7 @@
     },
     {
       "parameters": {
-        "url": "=https://api.greynoise.io/v3/ip/{{ $json.ip }}",
+        "url": "=https://api.greynoise.io/v3/community/{{ $json.ip }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {
@@ -63,7 +63,7 @@
       "maxTries": 3,
       "waitBetweenTries": 2000,
       "onError": "continueRegularOutput",
-      "notes": "Un solo endpoint: la v3 consolida el contexto de escáner y el conjunto RIOT que la v2 exigía en dos llamadas. Menos latencia, menos cuota, un solo punto de fallo."
+      "notes": "Apunta a /v3/community/{ip} (nivel gratuito) porque la cuenta configurada es Community, no de pago. La respuesta viene en un formato distinto y más pobre (sin JA4, CVEs ni puertos de destino) — lib/enrich.js → parseGreyNoise() detecta cuál de los dos formatos llegó por su forma, así que el resto del sistema no necesita saber cuál responde. Si la cuenta pasa a un tier de pago, cambiar esta URL a /v3/ip/{ip} y el parser se adapta solo."
     },
     {
       "parameters": {
