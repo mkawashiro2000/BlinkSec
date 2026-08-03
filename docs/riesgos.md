@@ -208,6 +208,67 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-13 · Contención y Human-in-the-Loop verificados en ejecución real (CERRADO, con una limitación arquitectónica de n8n corregida)
+
+Se levantó un stack de mocks (`tools/mock-services.js`, servidor HTTP plano que
+simula Wazuh, TheHive, GreyNoise, AbuseIPDB, VirusTotal e IBM X-Force) para
+ensayar WF-04, WF-05 y WF-07 sin credenciales ni infraestructura real. Los
+hostnames de ejemplo se redirigen al mock por alias de red interna, sólo
+dentro del proyecto.
+
+**Verificado de extremo a extremo, contra n8n real:**
+
+| Escenario | Resultado |
+|---|---|
+| Alerta maliciosa, activo de baja criticidad | Contención automática ejecutada contra el mock, `containment_log` con `undo_payload` y `expires_at` |
+| Alerta maliciosa, activo de alta criticidad, analista aprueba | HITL → resumeUrl real → contención ejecutada, `approved_by` con el nombre del analista |
+| Alerta maliciosa, activo de alta criticidad, analista rechaza | HITL → `containment_log` permanece vacío, sin ticket adicional |
+| Alerta maliciosa, activo de alta criticidad, sin respuesta | El `wait-tracker` de n8n reanuda solo al vencer la ventana; `aprobado=false`, cero contención, escalado a guardia registrado |
+
+**El fallo real, y el más caro de encontrar de toda la Fase 7.** La
+arquitectura original tenía WF-04 invocando a WF-05 con
+`waitForSubWorkflow: true` (esperando su resultado) para leer `aprobado` tras
+la decisión del analista. En ejecución real, WF-05 calculaba correctamente
+`aprobado: true` en su propia ejecución — pero WF-04, al reanudar, recibía
+`aprobado: undefined`. **La aprobación se perdía en la frontera entre los dos
+workflows, sin ningún error.**
+
+La causa: cuando un subflujo con su propio nodo `Wait` se invoca desde un
+llamador que también queda pausado esperando su retorno (una ejecución
+"waiting" anidada dentro de otra), n8n no propaga de forma fiable el valor de
+retorno del hijo hacia el padre al reanudar. No hay documentación oficial que
+lo advierta; se encontró por eliminación tras descartar — cada una tras su
+propio ciclo de prueba — la hipótesis del payload perdido por Split Out, la
+de un `webhookSuffix` con barra inicial redundante y la de un `webhookSuffix`
+evaluado con el contexto de item equivocado.
+
+**Corregido mediante un cambio de arquitectura, no un parche.** Se extrajo la
+ejecución real de la contención a un nuevo subflujo, **WF-08 — Ejecutar y
+registrar contención**. Ni WF-04 ni WF-05 esperan ya el uno al otro:
+
+- WF-04 pasó a ser un despachador puro: planifica, y según requiera
+  aprobación o no, invoca WF-05 o WF-08 con `waitForSubWorkflow: false`
+  (fire-and-forget) y termina ahí.
+- WF-05, tras resolver la decisión (aprobar, rechazar o expirar), invoca WF-08
+  directamente por su cuenta — nunca devuelve el control a un padre que
+  quedó pausado.
+- WF-08 contiene la lógica de ejecución que antes vivía en WF-04: separar
+  acciones, ejecutar contra la plataforma, registrar en `containment_log`,
+  invocar el ticketing.
+
+La regla queda además como guarda permanente en el compilador
+(`tools/build-workflows.js` → `validarReferenciasCruzadas`): cualquier nodo
+Execute Workflow con `waitForSubWorkflow: true` que apunte a un workflow con
+su propio nodo Wait hace fallar el build. Cubierto por
+`tests/build/build.test.js`.
+
+**Lección que queda escrita**: para HITL con nodos `Wait` en n8n, el
+subflujo que contiene el `Wait` debe ser el que **continúa la cadena hacia
+adelante** tras resolverse, nunca uno al que se le pide devolver un valor
+hacia arriba. Es el patrón contrario al que parece natural al diseñar
+(padre-espera-a-hijo), y vale la pena mantenerlo así de explícito para
+cualquier subflujo HITL que se añada en el futuro.
+
 ## R-12 · Caddy verificado en ejecución real (CERRADO, con un fallo real corregido)
 
 La capa perimetral (TLS, allowlist de red, rate limiting) estuvo sin ejecutar

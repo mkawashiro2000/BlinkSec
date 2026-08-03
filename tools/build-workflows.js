@@ -225,32 +225,87 @@ function validarWorkflow(wf, fichero) {
     }
   }
 
-  // Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Si
-  // alimenta directamente a un subflujo o a un enrutador, aguas abajo llega la
-  // fila de la base de datos en vez del payload — y el flujo continúa "con
-  // éxito" sobre datos que no son los suyos. En el primer despliegue real esto
-  // hacía que WF-02 planificara cero consultas y que TODAS las alertas
-  // acabaran en "investigar", incluidas las críticas.
+  // n8n-nodes-base.splitOut descarta TODOS los demás campos del item por
+  // defecto (include: "noOtherFields" es el default implícito cuando no se
+  // declara "include"). Sin "include: allOtherFields", cualquier campo que
+  // el nodo siguiente necesite del item original (alert_id, aprobadoPor...)
+  // llega undefined, y el fallo se manifiesta varios nodos más adelante como
+  // un error genérico de tipo del nodo consumidor, no como algo que apunte a
+  // Split Out. Encontrado en el ensayo de contención de la Fase 7: la fila de
+  // containment_log no se insertaba y el mensaje no mencionaba en ningún
+  // sitio "Split Out" ni "campos perdidos".
+  for (const nodo of wf.nodes ?? []) {
+    if (nodo.type !== 'n8n-nodes-base.splitOut') continue;
+    if (nodo.parameters?.include !== 'allOtherFields') {
+      errores.push(
+        `nodo "${nodo.name}": Split Out sin include:"allOtherFields" — descarta todos los campos salvo el separado`,
+      );
+    }
+  }
+
+  // Postgres y HTTP Request SUSTITUYEN el item por su propio resultado (filas
+  // de la consulta / cuerpo de la respuesta). Si uno de estos alimenta
+  // directamente a un nodo que necesita campos del payload ORIGINAL — otro
+  // Postgres, otro HTTP Request, un subflujo, un enrutador o un Split Out —
+  // aguas abajo llegan datos que no son los suyos y el flujo continúa "con
+  // éxito" sobre ellos.
+  //
+  // Encontrado dos veces en el ensayo de la Fase 7, con síntomas que no se
+  // parecían entre sí: primero con Postgres (WF-02 planificaba cero consultas
+  // de inteligencia, todas las alertas acababan en "investigar"); después con
+  // HTTP Request (WF-04: "Ejecutar contención" alimentaba directamente a
+  // "Registrar en containment_log", que fallaba con un mensaje genérico del
+  // propio Postgres — "Query Parameters must be a string..." — sin ninguna
+  // mención al HTTP Request que en realidad causaba el problema).
   const porNombre = new Map((wf.nodes ?? []).map((n) => [n.name, n]));
+  const DESTRUCTORES_DE_PAYLOAD = new Set(['n8n-nodes-base.postgres', 'n8n-nodes-base.httpRequest']);
   const CONSUMIDORES_DE_PAYLOAD = new Set([
     'n8n-nodes-base.executeWorkflow',
     'n8n-nodes-base.switch',
     'n8n-nodes-base.splitOut',
+    ...DESTRUCTORES_DE_PAYLOAD,
   ]);
+
+  // Campos que un HTTP Request SÍ deja legítimamente en $json: leer
+  // $json.body.algo es leer la respuesta a propósito (ej. el _id que devolvió
+  // TheHive al crear el ticket), no una suposición rota sobre datos previos.
+  // Postgres no tiene un equivalente estable (las columnas del SELECT/RETURNING
+  // varían por consulta), así que para Postgres cualquier $json suelto se trata
+  // como sospechoso.
+  const CAMPOS_PROPIOS_HTTP = ['body', 'headers', 'statusCode', 'statusMessage'];
 
   for (const [origen, conexiones] of Object.entries(wf.connections ?? {})) {
     const nodoOrigen = porNombre.get(origen);
-    if (nodoOrigen?.type !== 'n8n-nodes-base.postgres') continue;
+    if (!DESTRUCTORES_DE_PAYLOAD.has(nodoOrigen?.type)) continue;
+
+    const esHttp = nodoOrigen.type === 'n8n-nodes-base.httpRequest';
+    const etiquetaOrigen = esHttp ? 'HTTP Request' : 'Postgres';
 
     for (const salidas of conexiones.main ?? []) {
       for (const destino of salidas ?? []) {
         const nodoDestino = porNombre.get(destino.node);
-        if (nodoDestino && CONSUMIDORES_DE_PAYLOAD.has(nodoDestino.type)) {
-          errores.push(
-            `"${origen}" (Postgres) alimenta directamente a "${destino.node}": ` +
-              'intercalar un nodo Code que restaure el payload',
-          );
+        if (!nodoDestino || !CONSUMIDORES_DE_PAYLOAD.has(nodoDestino.type)) continue;
+
+        // Se descartan las referencias inmunes antes de buscar $json suelto:
+        //   - $('Nombre de nodo').json  → no depende de lo que dejó el nodo
+        //     inmediatamente anterior.
+        //   - $json.body / $json.headers / etc. (sólo si el origen es HTTP)
+        //     → lectura deliberada de la propia respuesta.
+        let texto = JSON.stringify(nodoDestino.parameters ?? {}).replace(
+          /\$\(\s*['"][^'"]*['"]\s*\)\.\s*json\b/g,
+          '',
+        );
+        if (esHttp) {
+          const patronPropios = new RegExp(`\\$json(\\?)?\\.(${CAMPOS_PROPIOS_HTTP.join('|')})\\b`, 'g');
+          texto = texto.replace(patronPropios, '');
         }
+
+        if (!/\$json\b/.test(texto)) continue;
+
+        errores.push(
+          `"${origen}" (${etiquetaOrigen}) alimenta directamente a "${destino.node}", que usa \$json: ` +
+            'intercalar un nodo Code que restaure el payload',
+        );
       }
     }
   }
@@ -276,6 +331,11 @@ function validarWorkflow(wf, fichero) {
  */
 function validarReferenciasCruzadas(compilados) {
   const conocidos = new Map(compilados.map(({ wf }) => [wf.id, wf.name]));
+  // Necesario para la regla de espera anidada, más abajo: qué workflows
+  // contienen su propio nodo Wait.
+  const tieneWait = new Map(
+    compilados.map(({ wf }) => [wf.id, (wf.nodes ?? []).some((n) => n.type === 'n8n-nodes-base.wait')]),
+  );
   const errores = [];
 
   for (const { fichero, wf } of compilados) {
@@ -289,8 +349,26 @@ function validarReferenciasCruzadas(compilados) {
       const destino = nodo.parameters?.workflowId?.value;
       if (!destino) {
         errores.push(`${fichero} → "${nodo.name}": sin workflowId`);
-      } else if (!conocidos.has(destino)) {
+        continue;
+      }
+      if (!conocidos.has(destino)) {
         errores.push(`${fichero} → "${nodo.name}": apunta a "${destino}", que no existe`);
+        continue;
+      }
+
+      // n8n no propaga de forma fiable el valor de retorno de un subflujo con
+      // su propio nodo Wait cuando el llamador (waitForSubWorkflow=true) queda
+      // TAMBIÉN en pausa esperándolo. Encontrado en el ensayo de HITL de la
+      // Fase 7: el subflujo calculaba el valor correcto en su propia
+      // ejecución, pero el llamador recibía undefined al reanudar — sin
+      // ningún error. El subflujo con el Wait debe continuar la cadena por su
+      // cuenta (invocando el siguiente paso él mismo), nunca devolver el
+      // control a un padre que quedó pausado.
+      const espera = nodo.parameters?.options?.waitForSubWorkflow === true;
+      if (espera && tieneWait.get(destino)) {
+        errores.push(
+          `${fichero} → "${nodo.name}": waitForSubWorkflow=true hacia "${destino}", que contiene un nodo Wait`,
+        );
       }
     }
   }

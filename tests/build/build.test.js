@@ -18,7 +18,7 @@ const RAIZ = path.join(__dirname, '..', '..');
 const SRC = path.join(RAIZ, 'workflows', 'src');
 const DIST = path.join(RAIZ, 'workflows', 'dist');
 
-const { adaptarModulo, validarWorkflow } = require('../../tools/build-workflows.js');
+const { adaptarModulo, validarWorkflow, validarReferenciasCruzadas } = require('../../tools/build-workflows.js');
 
 const ficherosDist = () => fs.readdirSync(DIST).filter((f) => f.endsWith('.json'));
 const leerDist = (f) => JSON.parse(fs.readFileSync(path.join(DIST, f), 'utf8'));
@@ -100,6 +100,15 @@ test('sólo se permite require de crypto entre los módulos nativos', () => {
       }
     }
   }
+});
+
+test('ningún llamador espera de forma síncrona a un subflujo que contiene su propio Wait', () => {
+  // La regla vive en tools/build-workflows.js (validarReferenciasCruzadas),
+  // como el resto de comprobaciones cross-workflow: así falla el build en
+  // CI, no sólo la suite de tests. Aquí sólo se confirma que el set actual
+  // de workflows la cumple.
+  const compilados = ficherosDist().map((f) => ({ fichero: f, wf: leerDist(f) }));
+  validarReferenciasCruzadas(compilados); // lanza si detecta el patrón
 });
 
 test('el gateway compilado contiene la verificación HMAC real', () => {
@@ -247,6 +256,33 @@ test('el webhook de ingesta exige rawBody', () => {
   assert.equal(webhook.parameters.options.rawBody, true);
 });
 
+test('todo nodo Split Out conserva los demás campos del item', () => {
+  // Por defecto, Split Out descarta TODOS los campos salvo el separado. En el
+  // ensayo de contención de la Fase 7 esto hizo desaparecer alert_id y
+  // aprobadoPor entre "Planificar contención" y "Registrar en
+  // containment_log" — el fallo se manifestó como un error genérico de tipo
+  // en el nodo Postgres consumidor, sin ninguna referencia a Split Out.
+  for (const f of ficherosDist()) {
+    for (const nodo of leerDist(f).nodes) {
+      if (nodo.type !== 'n8n-nodes-base.splitOut') continue;
+      assert.equal(nodo.parameters?.include, 'allOtherFields', `${f} → "${nodo.name}"`);
+    }
+  }
+});
+
+test('ningún HTTP Request ni Postgres alimenta directamente a un consumidor que dependa de $json', () => {
+  // Postgres y HTTP Request sustituyen el item por su propio resultado. Se
+  // encontró en el ensayo de la Fase 7: WF-04 tenía "Ejecutar contención"
+  // (HTTP Request) conectado directamente a "Registrar en containment_log"
+  // (Postgres), que leía $json.alert_id y $json.accion — campos que ya no
+  // existían, sustituidos por { body, headers, statusCode }. El error que dio
+  // n8n no mencionaba en ningún sitio al HTTP Request.
+  for (const f of ficherosDist()) {
+    const wf = leerDist(f);
+    validarWorkflow(wf, f); // lanza si detecta el patrón; el test falla con su mensaje
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Unidades del compilador
 // ---------------------------------------------------------------------------
@@ -307,5 +343,82 @@ test('validarWorkflow rechaza nombres de nodo duplicados', () => {
         'x.json',
       ),
     /duplicado/,
+  );
+});
+
+test('validarWorkflow rechaza un HTTP Request que alimenta a un Postgres dependiente de $json', () => {
+  // Reproduce exactamente el bug real del ensayo de contención: un HTTP
+  // Request sustituye el item por su respuesta, y el Postgres siguiente lee
+  // $json.alert_id — un campo que ya no existe.
+  assert.throws(
+    () =>
+      validarWorkflow(
+        {
+          name: '[BlinkSec] WF-01 - Prueba - v1',
+          nodes: [
+            { name: 'http', type: 'n8n-nodes-base.httpRequest' },
+            {
+              name: 'pg',
+              type: 'n8n-nodes-base.postgres',
+              parameters: { query: 'INSERT INTO x VALUES ($1)', options: { queryReplacement: '={{ [$json.alert_id] }}' } },
+            },
+          ],
+          connections: { http: { main: [[{ node: 'pg' }]] } },
+        },
+        'x.json',
+      ),
+    /alimenta directamente/,
+  );
+});
+
+test('validarWorkflow NO marca un HTTP Request que sólo lee su propia respuesta', () => {
+  // $json.body._id tras un HTTP Request es la lectura deliberada de lo que
+  // ese mismo nodo acaba de devolver (ej. el id de un ticket recién creado),
+  // no una suposición rota sobre datos de un paso anterior.
+  assert.doesNotThrow(() =>
+    validarWorkflow(
+      {
+        id: 'blinksecwf01prue',
+        active: false,
+        name: '[BlinkSec] WF-01 - Prueba - v1',
+        nodes: [
+          { name: 'http', type: 'n8n-nodes-base.httpRequest' },
+          {
+            name: 'pg',
+            type: 'n8n-nodes-base.postgres',
+            parameters: { query: 'UPDATE x SET y=$1', options: { queryReplacement: '={{ [$json.body?._id] }}' } },
+          },
+        ],
+        connections: { http: { main: [[{ node: 'pg' }]] } },
+      },
+      'x.json',
+    ),
+  );
+});
+
+test('validarWorkflow NO marca un consumidor que sólo referencia nodos por nombre', () => {
+  // $('Nombre de nodo').json no depende de lo que dejó el nodo inmediatamente
+  // anterior en $json: es inmune al destructor de payload.
+  assert.doesNotThrow(() =>
+    validarWorkflow(
+      {
+        id: 'blinksecwf01prue',
+        active: false,
+        name: '[BlinkSec] WF-01 - Prueba - v1',
+        nodes: [
+          { name: 'http', type: 'n8n-nodes-base.httpRequest' },
+          {
+            name: 'pg',
+            type: 'n8n-nodes-base.postgres',
+            parameters: {
+              query: 'INSERT INTO x VALUES ($1)',
+              options: { queryReplacement: "={{ [$('Otro nodo').item.json.alert_id] }}" },
+            },
+          },
+        ],
+        connections: { http: { main: [[{ node: 'pg' }]] } },
+      },
+      'x.json',
+    ),
   );
 });

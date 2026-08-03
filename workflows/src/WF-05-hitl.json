@@ -67,7 +67,7 @@
       "parameters": {
         "resume": "webhook",
         "options": {
-          "webhookSuffix": "=/{{ $json.alert_id }}",
+          "webhookSuffix": "decision",
           "limitWaitTime": true,
           "resumeAmount": 15,
           "resumeUnit": "minutes"
@@ -82,7 +82,7 @@
         300
       ],
       "webhookId": "blinksec-hitl",
-      "notes": "La ejecución queda suspendida en el servidor, sin consumir un worker. Al expirar los 15 min el flujo continúa SIN decisión — y la rama de abajo interpreta eso como rechazo. Fail-safe, no fail-open."
+      "notes": "La ejecución queda suspendida en el servidor, sin consumir un worker. Al expirar los 15 min el flujo continúa SIN decisión — y la rama de abajo interpreta eso como rechazo. Fail-safe, no fail-open. | webhookSuffix es un valor ESTÁTICO a propósito, no una expresión con $json. n8n compara el 'path' registrado (evaluado por NodeHelpers.getNodeWebhooks al pausar, SIN el contexto del item que fluía por el nodo) contra el suffix recibido en la URL — con una expresión como '{{ $json.alert_id }}' el path que se registra de verdad no es el que cree el analista, y ninguna petición de reanudación casa jamás (404 'no waiting webhook with a matching path', consistentemente, sin importar qué se envíe). El executionId de la URL de reanudación (/webhook-waiting/<executionId>/<suffix>) ya identifica la ejecución de forma única; el suffix sólo necesita distinguir ESTE nodo Wait de otros nodos Wait del MISMO workflow, así que un valor estático basta. Encontrado en el ensayo de HITL de la Fase 7, tras descartar primero la hipótesis (también real, y corregida) de la barra inicial sobrante."
     },
     {
       "parameters": {
@@ -153,7 +153,103 @@
           "name": "BlinkSec Slack"
         }
       },
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "El nodo Slack sustituye el item por su propia respuesta — se restaura en 'Restaurar tras escalar' antes de devolver el control a WF-04."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-05 · Restauración del payload tras escalar por timeout.\n//\n// El nodo Slack (como cualquier HTTP Request) sustituye el item por su\n// propia respuesta. Sin restaurar, WF-04 recibiría la respuesta de Slack en\n// vez de { aprobado: false, ... }, y la interpretación de la decisión se\n// perdería justo en el camino de escalado.\n\nreturn [{ json: $('Interpretar decisión').item.json }];"
+      },
+      "id": "wf05-restore-escalate",
+      "name": "Restaurar tras escalar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        200
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "wf05-salida",
+      "name": "Salida",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        900,
+        300
+      ],
+      "notes": "Punto de retorno único del subflujo, con o sin timeout. Sin esto, la rama 'no expiró' (que es la que lleva la decisión real del analista) terminaba en una conexión vacía y WF-04 recibía un item vacío en su lugar — la aprobación se perdía incluso cuando el analista SÍ había pulsado 'Contener ahora'."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-aprobado-final",
+              "leftValue": "={{ $json.aprobado }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf05-if-aprobado-final",
+      "name": "¿Aprobado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        900,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf08ejec",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wf05-call-wf08",
+      "name": "Invocar WF-08 Ejecutar contención",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        320
+      ],
+      "notes": "WF-05 invoca WF-08 directamente tras resolver la decisión, en vez de devolver el control a WF-04. WF-04 nunca queda pausado esperando este resultado (ver su nota en \"Invocar WF-05 Human-in-the-Loop\")."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-05 · Registro de un rechazo explícito.\n//\n// Que un analista pulse 'Ignorar' es una decisión operativa tan valiosa\n// como una aprobación: si esta rama se dispara con frecuencia sobre el\n// mismo tipo de alerta, el motor de triaje probablemente sobre-puntúa\n// ese patrón y conviene revisar los pesos.\n\nconst a = $input.first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'contencion_rechazada_por_humano',\n      alert_id: a.alert_id,\n      rechazadoPor: a.aprobadoPor ?? null,\n      veredicto: a.triage?.verdict,\n      puntuacion: a.triage?.score,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
+      },
+      "id": "wf05-log-reject",
+      "name": "Registrar rechazo explícito",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        440
+      ]
     }
   ],
   "connections": {
@@ -221,7 +317,64 @@
             "index": 0
           }
         ],
-        []
+        [
+          {
+            "node": "Salida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalar a guardia": {
+      "main": [
+        [
+          {
+            "node": "Restaurar tras escalar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar tras escalar": {
+      "main": [
+        [
+          {
+            "node": "Salida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Salida": {
+      "main": [
+        [
+          {
+            "node": "¿Aprobado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Aprobado?": {
+      "main": [
+        [
+          {
+            "node": "Invocar WF-08 Ejecutar contención",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar rechazo explícito",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
@@ -233,7 +386,7 @@
   "meta": {
     "blinksec": {
       "fase": 5,
-      "descripcion": "Suspende la ejecución hasta que un analista aprueba desde Slack. El timeout equivale a rechazo: sin respuesta humana no se toca producción."
+      "descripcion": "Suspende la ejecución hasta que un analista aprueba desde Slack. El timeout equivale a rechazo: sin respuesta humana no se toca producción. Tras resolver la decisión, invoca WF-08 directamente (no devuelve el control a WF-04): n8n no propaga de forma fiable el retorno de un subflujo con su propio Wait cuando el llamador queda también en pausa."
     }
   }
 }

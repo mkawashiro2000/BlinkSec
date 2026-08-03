@@ -12,20 +12,24 @@ SIEM ──HMAC──▶ WF-00 gateway ──▶ WF-01 normalizar ──▶ WF-0
                                           ┌─────────────────┼─────────────────┐
                                     <20 falso positivo  20-70 investigar  >70 crítico
                                           │                 │                 │
-                                    cerrar en SIEM     WF-06 ticket    WF-04 contención
-                                                                              │
-                                                                       WF-05 aprobación
-                                                                        humana si aplica
+                                    cerrar en SIEM     WF-06 ticket    WF-04 despacha
+                                                                       ┌──────┴──────┐
+                                                                sin aprobación   WF-05 HITL
+                                                                       │        (Slack + Wait)
+                                                                       └──────┬──────┘
+                                                                       WF-08 ejecuta
+                                                                     y registra la
+                                                                        contención
 ```
 
 ## Estado
 
 MVP funcional, **desplegado y verificado en ejecución real** sobre n8n 1.72.1
-(Docker, modo queue, Postgres + Redis + Caddy). 155 tests en verde.
+(Docker, modo queue, Postgres + Redis + Caddy). 160 tests en verde.
 
 Verificado de extremo a extremo contra el despliegue:
 
-- Los 9 workflows importan y se enlazan entre sí sin pasos manuales.
+- Los 10 workflows importan y se enlazan entre sí sin pasos manuales.
 - El gateway acepta la firma válida y rechaza los 6 vectores de ataque
   probados: firma incorrecta, firma ausente, cuerpo alterado, reenvío con
   timestamp caducado, secreto de otro origen y origen desconocido.
@@ -46,9 +50,21 @@ Verificado de extremo a extremo contra el despliegue:
   restricción del `.env` y caía a su default de "cualquier red privada". Ver
   R-12 en `docs/riesgos.md`. Ahora hay un chequeo dedicado
   (`npm run check:caddy-env`) que lo bloquea en CI.
+- **Contención y Human-in-the-Loop probados de extremo a extremo** contra un
+  stack de mocks (Wazuh, TheHive, GreyNoise, AbuseIPDB, VirusTotal, X-Force):
+  auto-contención sobre activo de baja criticidad, aprobación humana real vía
+  el webhook de reanudación de n8n, rechazo explícito, y timeout real (el
+  `wait-tracker` de n8n reanuda solo tras 10 s sin respuesta, sin ejecutar
+  nada). Se encontró y corrigió una limitación arquitectónica real de n8n:
+  un subflujo con su propio nodo `Wait`, invocado por un padre que también
+  queda pausado esperando su retorno, pierde el valor de retorno al reanudar
+  — sin ningún error. Se resolvió extrayendo la ejecución de la contención a
+  un nuevo subflujo, **WF-08**, de forma que ni WF-04 ni WF-05 esperan ya el
+  uno al otro. Ver R-13 en `docs/riesgos.md`.
 
-Lo que **no** está verificado: las APIs reales de inteligencia (no hay claves),
-un manager de Wazuh real, y la contención real sobre un firewall. Ver
+Lo que **no** está verificado: las APIs reales de inteligencia (no hay claves)
+y un manager de Wazuh real — sus respuestas se simularon con un mock fiel a la
+forma de cada API, pero no son las APIs de verdad. Ver
 [Antes de producción](#antes-de-producción) y [docs/riesgos.md](docs/riesgos.md).
 
 ### Rendimiento medido
@@ -139,7 +155,7 @@ lib/            módulos de dominio, puros y testeables (gateway, normalize, enr
 scoring/        motor de triaje + pesos versionados aparte
 workflows/src/  plantillas de workflow con marcadores de inyección
 workflows/dist/ compilados, listos para importar en n8n  ← generado, no editar
-tools/          compilador y validador de workflows
+tools/          compilador, validador y mock-services.js (mocks de Wazuh/TheHive/intel para ensayos sin credenciales)
 integrations/   lado SIEM: Wazuh, Splunk, Elastic
 tests/          gateway · fixtures · triage · build
 docker/         compose endurecido, Caddy, esquema de Postgres
@@ -184,8 +200,10 @@ positivos auto-contenidos**.
 5. **Validar el nodo Redis de WF-00.** La idempotencia necesita semántica
    SETNX; según la versión del nodo puede requerir el patrón alternativo de
    `docs/runbook-idempotencia.md`.
-6. **Ensayo de contención en laboratorio** antes de conectar producción:
-   bloquear una IP de prueba, verificar el registro, verificar la reversión.
+6. **Repetir el ensayo de contención contra la infraestructura real** (no el
+   mock): bloquear una IP de prueba en el Wazuh real, verificar el registro,
+   verificar la reversión. El flujo en sí ya está verificado contra un mock
+   fiel (R-13); lo que falta es la integración con la API real.
 7. **Re-etiquetar el corpus** con 100+ alertas reales y recalcular la matriz.
 
 Los riesgos abiertos y las excepciones conscientes al modelo de amenaza están

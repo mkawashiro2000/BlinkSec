@@ -1,0 +1,232 @@
+{
+  "id": "blinksecwf08ejec",
+  "active": false,
+  "name": "[BlinkSec] WF-08 - Ejecutar y registrar contencion - v1",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "wf08-trigger",
+      "name": "Entrada",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "plan.actions",
+        "include": "allOtherFields",
+        "options": {
+          "destinationFieldName": "accion"
+        }
+      },
+      "id": "wf04-split",
+      "name": "Separar acciones",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -380,
+        300
+      ],
+      "notes": "include=allOtherFields es OBLIGATORIO. Por defecto Split Out descarta TODOS los demás campos del item y deja sólo el campo separado — alert_id, aprobadoPor, etc. desaparecen. El nodo siguiente ('Registrar en containment_log') fallaba con 'Query Parameters must be a string...' porque $json.alert_id llegaba undefined. Encontrado en el ensayo de contención de la Fase 7."
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://wazuh.example.com:55000/active-response",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.accion.request.body) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "wf04-execute",
+      "name": "Ejecutar contención",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -160,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-wazuh",
+          "name": "Wazuh API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Restauración del payload tras ejecutar la contención.\n//\n// El nodo HTTP Request SUSTITUYE el item por su propia respuesta (body,\n// headers, statusCode) — igual que un nodo Postgres sustituye el item por el\n// resultado de su consulta. Sin restaurar aquí, 'Registrar en\n// containment_log' recibe { body, headers, statusCode } en vez de la alerta,\n// y $json.alert_id / $json.accion llegan undefined. El síntoma en n8n no\n// menciona el HTTP node en ningún sitio: el Postgres node falla con\n// 'Query Parameters must be a string of comma-separated values or an array\n// of values', un error genérico que no apunta a la causa real. Encontrado en\n// el ensayo de contención de la Fase 7.\n//\n// Se usa $(...).item, NO $(...).first(): con dos acciones para la misma\n// alerta (ej. bloqueo de IP + aislamiento de host), .first() asignaría\n// siempre la PRIMERA acción a todas las filas de containment_log. .item\n// resuelve por pairedItem al item que realmente corresponde a esta\n// ejecución concreta del nodo.\n\nconst origen = $('Separar acciones').item.json;\nconst respuesta = $input.first().json;\n\nreturn [\n  {\n    json: {\n      ...origen,\n      httpStatus: respuesta.statusCode ?? null,\n    },\n  },\n];"
+      },
+      "id": "wf04-restore-post-http",
+      "name": "Restaurar tras ejecutar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        300
+      ],
+      "notes": "Ver el rationale completo en el propio código del nodo."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO blinksec.containment_log\n  (alert_id, action_type, target, platform, undo_payload, approved_by, expires_at)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz);",
+        "options": {
+          "queryReplacement": "={{ [$json.alert_id, $json.accion.action_type, $json.accion.target, $json.accion.platform, JSON.stringify($json.accion.undo_payload), $json.aprobadoPor ?? null, $json.accion.expires_at] }}"
+        }
+      },
+      "id": "wf04-log",
+      "name": "Registrar en containment_log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        280,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
+      "notes": "Regla de oro: ninguna contención existe sin su undo_payload y su expires_at registrados. WF-07 recorre esta tabla y propone las reversiones vencidas."
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-04 · Restauración del payload tras registrar la contención.\n//\n// El INSERT en containment_log deja su propio resultado en el item. WF-06\n// necesita la alerta completa con su plan para componer el ticket: sin\n// restaurar, el ticket saldría vacío de contexto justo en el caso que más\n// importa documentar, el de una contención ya ejecutada.\n//\n// $(...).item, no .first(): con más de una acción por alerta, .first()\n// asignaría siempre la primera a todas las invocaciones de WF-06.\n\nconst base = $('Separar acciones').item.json;\n\nreturn [{ json: base }];"
+      },
+      "id": "wf04-restore",
+      "name": "Restaurar alerta contenida",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        300
+      ],
+      "notes": "Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Sin este restaurador, WF-06 recibiría la fila insertada en lugar de la alerta."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf06tick",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "wf04-call-ticket",
+      "name": "Invocar WF-06 Ticketing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        720,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Entrada": {
+      "main": [
+        [
+          {
+            "node": "Separar acciones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Separar acciones": {
+      "main": [
+        [
+          {
+            "node": "Ejecutar contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejecutar contención": {
+      "main": [
+        [
+          {
+            "node": "Restaurar tras ejecutar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar tras ejecutar": {
+      "main": [
+        [
+          {
+            "node": "Registrar en containment_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar en containment_log": {
+      "main": [
+        [
+          {
+            "node": "Restaurar alerta contenida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar alerta contenida": {
+      "main": [
+        [
+          {
+            "node": "Invocar WF-06 Ticketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "blinksecwf99errs"
+  },
+  "pinData": {},
+  "meta": {
+    "blinksec": {
+      "fase": 5,
+      "descripcion": "Ejecuta las acciones de un plan de contención ya decidido y las registra. Extraído de WF-04 en la Fase 7: n8n no propaga de forma fiable el valor de retorno de un subflujo que contiene su propio nodo Wait cuando el llamador queda a su vez en pausa esperándolo (ejecución \"waiting\" anidada). Al mover esta lógica a un subflujo aparte, tanto la vía automática (WF-04) como la vía aprobada por un humano (WF-05, tras resolver su Wait) lo invocan de igual manera, sin que ningún llamador quede jamás pausado esperando el retorno de otro nodo Wait."
+    }
+  }
+}
