@@ -1,11 +1,11 @@
 {
+  "id": "blinksecwf02enrq",
   "name": "[BlinkSec] WF-02 - Enriquecimiento IoC - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
-        "workflowInputs": {
-          "values": []
-        }
+        "inputSource": "passthrough"
       },
       "id": "wf02-trigger",
       "name": "Entrada desde WF-01",
@@ -14,7 +14,8 @@
       "position": [
         -600,
         300
-      ]
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -215,7 +216,7 @@
       "parameters": {
         "workflowId": {
           "__rl": true,
-          "value": "WF-03",
+          "value": "blinksecwf03tria",
           "mode": "list"
         },
         "workflowInputs": {
@@ -343,7 +344,7 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

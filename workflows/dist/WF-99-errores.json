@@ -1,5 +1,7 @@
 {
+  "id": "blinksecwf99errs",
   "name": "[BlinkSec] WF-99 - Manejador global de errores - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {},

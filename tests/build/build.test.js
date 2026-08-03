@@ -161,11 +161,69 @@ test('todas las conexiones apuntan a nodos existentes', () => {
   }
 });
 
-test('todos los flujos salvo WF-99 declaran errorWorkflow', () => {
+test('todos los flujos salvo WF-99 apuntan a WF-99 como errorWorkflow', () => {
+  // Se compara contra el id determinista, no contra el nombre lógico: n8n
+  // resuelve referencias por id, y usar el nombre dejaría el manejador de
+  // errores desconectado sin que nada lo señale.
+  const idWF99 = leerDist('WF-99-errores.json').id;
   for (const f of ficherosDist()) {
     const wf = leerDist(f);
     if (wf.name.includes('WF-99')) continue;
-    assert.equal(wf.settings?.errorWorkflow, 'WF-99', `${f}: sin errorWorkflow`);
+    assert.equal(wf.settings?.errorWorkflow, idWF99, `${f}: errorWorkflow no apunta a WF-99`);
+  }
+});
+
+test('todos los workflows llevan id determinista', () => {
+  // Sin id estable, `n8n import:workflow` crea un DUPLICADO en cada
+  // reimportación en vez de actualizar. En el primer despliegue real eso dejó
+  // activo el gateway de la versión anterior tras desplegar un arreglo de
+  // seguridad, sin ningún error visible.
+  const vistos = new Set();
+  for (const f of ficherosDist()) {
+    const wf = leerDist(f);
+    assert.match(wf.id, /^blinksecwf\d{2}[a-z]{4}$/, `${f}: id "${wf.id}" fuera de convención`);
+    assert.ok(!vistos.has(wf.id), `${f}: id duplicado ${wf.id}`);
+    vistos.add(wf.id);
+  }
+});
+
+test('los triggers de subflujo propagan datos', () => {
+  // Con lista de campos vacía y sin passthrough, el subflujo recibe un objeto
+  // vacío y se ejecuta "con éxito" sobre datos inexistentes.
+  for (const f of ficherosDist()) {
+    for (const nodo of leerDist(f).nodes) {
+      if (nodo.type !== 'n8n-nodes-base.executeWorkflowTrigger') continue;
+      const campos = nodo.parameters?.workflowInputs?.values ?? [];
+      assert.ok(
+        nodo.parameters?.inputSource === 'passthrough' || campos.length > 0,
+        `${f} → "${nodo.name}": no recibiría datos`,
+      );
+    }
+  }
+});
+
+test('los SELECT de Postgres declaran alwaysOutputData', () => {
+  // Un SELECT sin filas produce cero items y n8n detiene la rama en silencio,
+  // marcando la ejecución como exitosa. Con el inventario de activos vacío
+  // —el estado normal el primer día— se descartaban TODAS las alertas.
+  for (const f of ficherosDist()) {
+    for (const nodo of leerDist(f).nodes) {
+      if (nodo.type !== 'n8n-nodes-base.postgres') continue;
+      if (!String(nodo.parameters?.query ?? '').trim().toUpperCase().startsWith('SELECT')) continue;
+      assert.equal(nodo.alwaysOutputData, true, `${f} → "${nodo.name}": SELECT sin alwaysOutputData`);
+    }
+  }
+});
+
+test('queryReplacement usa expresiones de array, no listas separadas por comas', () => {
+  // El formato csv se rompe con cualquier valor que contenga una coma (JSON
+  // serializado, mensajes de error), con un NodeOperationError opaco.
+  for (const f of ficherosDist()) {
+    for (const nodo of leerDist(f).nodes) {
+      const qr = nodo.parameters?.options?.queryReplacement;
+      if (typeof qr !== 'string' || !qr.startsWith('=')) continue;
+      assert.match(qr, /^=\{\{\s*\[/, `${f} → "${nodo.name}": queryReplacement en formato csv`);
+    }
   }
 });
 

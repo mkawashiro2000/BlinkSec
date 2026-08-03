@@ -1,11 +1,11 @@
 {
+  "id": "blinksecwf04cont",
   "name": "[BlinkSec] WF-04 - Contencion - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
-        "workflowInputs": {
-          "values": []
-        }
+        "inputSource": "passthrough"
       },
       "id": "wf04-trigger",
       "name": "Entrada desde WF-03",
@@ -14,7 +14,8 @@
       "position": [
         -620,
         300
-      ]
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -97,7 +98,7 @@
       "parameters": {
         "workflowId": {
           "__rl": true,
-          "value": "WF-05",
+          "value": "blinksecwf05hitl",
           "mode": "list"
         },
         "workflowInputs": {
@@ -210,7 +211,7 @@
         "operation": "executeQuery",
         "query": "INSERT INTO blinksec.containment_log\n  (alert_id, action_type, target, platform, undo_payload, approved_by, expires_at)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz);",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }},{{ $json.accion.action_type }},{{ $json.accion.target }},{{ $json.accion.platform }},{{ JSON.stringify($json.accion.undo_payload) }},{{ $json.aprobadoPor ?? null }},{{ $json.accion.expires_at }}"
+          "queryReplacement": "={{ [$json.alert_id, $json.accion.action_type, $json.accion.target, $json.accion.platform, JSON.stringify($json.accion.undo_payload), $json.aprobadoPor ?? null, $json.accion.expires_at] }}"
         }
       },
       "id": "wf04-log",
@@ -231,9 +232,23 @@
     },
     {
       "parameters": {
+        "jsCode": "// WF-04 · Restauración del payload tras registrar la contención.\n//\n// El INSERT en containment_log deja su propio resultado en el item. WF-06\n// necesita la alerta completa con su plan para componer el ticket: sin\n// restaurar, el ticket saldría vacío de contexto justo en el caso que más\n// importa documentar, el de una contención ya ejecutada.\n\nconst base = $('Planificar contención').first().json;\n\nreturn [\n  {\n    json: {\n      ...base,\n      // Se conserva quién aprobó, que sólo existe si pasó por WF-05.\n      aprobadoPor: $('Planificar contención').first().json.aprobadoPor ?? null,\n    },\n  },\n];"
+      },
+      "id": "wf04-restore",
+      "name": "Restaurar alerta contenida",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        300
+      ],
+      "notes": "Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Sin este restaurador, WF-06 recibiría la fila insertada en lugar de la alerta."
+    },
+    {
+      "parameters": {
         "workflowId": {
           "__rl": true,
-          "value": "WF-06",
+          "value": "blinksecwf06tick",
           "mode": "list"
         },
         "workflowInputs": {
@@ -381,6 +396,17 @@
       "main": [
         [
           {
+            "node": "Restaurar alerta contenida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar alerta contenida": {
+      "main": [
+        [
+          {
             "node": "Invocar WF-06 Ticketing",
             "type": "main",
             "index": 0
@@ -391,7 +417,7 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

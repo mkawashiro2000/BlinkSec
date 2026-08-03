@@ -1,5 +1,7 @@
 {
+  "id": "blinksecwf07revr",
   "name": "[BlinkSec] WF-07 - Reversion programada - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
@@ -132,7 +134,7 @@
         "operation": "executeQuery",
         "query": "UPDATE blinksec.containment_log\nSET reverted_at = CASE WHEN $2::boolean THEN now() ELSE NULL END,\n    revert_error = $3\nWHERE id = $1;",
         "options": {
-          "queryReplacement": "={{ $json.id }},{{ $json.ok }},{{ $json.error }}"
+          "queryReplacement": "={{ [$json.id, $json.ok, $json.error] }}"
         }
       },
       "id": "wf07-update",
@@ -294,7 +296,7 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

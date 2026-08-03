@@ -1,23 +1,21 @@
 {
+  "id": "blinksecwf01norm",
   "name": "[BlinkSec] WF-01 - Normalizacion - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
-        "workflowInputs": {
-          "values": [
-            { "name": "source", "type": "string" },
-            { "name": "rawBody", "type": "string" },
-            { "name": "alertId", "type": "string" },
-            { "name": "agentId", "type": "string" },
-            { "name": "ingestStartedAt", "type": "number" }
-          ]
-        }
+        "inputSource": "passthrough"
       },
       "id": "wf01-trigger",
       "name": "Entrada desde WF-00",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
-      "position": [-400, 300]
+      "position": [
+        -400,
+        300
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -27,22 +25,36 @@
       "name": "Normalizar",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-180, 300]
+      "position": [
+        -180,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "SELECT hostname, criticality, never_isolate, owner_team\nFROM blinksec.assets\nWHERE hostname = $1\nLIMIT 1;",
-        "options": { "queryReplacement": "={{ $json.asset.host }}" }
+        "options": {
+          "queryReplacement": "={{ [$json.asset.host] }}"
+        }
       },
       "id": "wf01-lookup-asset",
       "name": "Consultar inventario de activos",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [40, 300],
-      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "position": [
+        40,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
       "onError": "continueRegularOutput",
-      "notes": "Si esta consulta falla, el activo queda con criticality='high' (valor conservador de lib/normalize.js) y toda contención pasará por aprobación humana. Fallar hacia el lado seguro, no hacia el cómodo."
+      "notes": "Si esta consulta falla, el activo queda con criticality='high' (valor conservador de lib/normalize.js) y toda contención pasará por aprobación humana. Fallar hacia el lado seguro, no hacia el cómodo. | alwaysOutputData es OBLIGATORIO: un SELECT sin filas devuelve cero items y n8n detiene la rama en silencio, reportando la ejecución como exitosa. Sin esto, con el inventario vacío se descartan TODAS las alertas sin dejar rastro.",
+      "alwaysOutputData": true
     },
     {
       "parameters": {
@@ -52,34 +64,66 @@
       "name": "Fusionar criticidad",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [260, 300]
+      "position": [
+        260,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO blinksec.alerts (alert_id, source, rule_id, rule_name, asset_hostname, normalized, received_at)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb, now())\nON CONFLICT (alert_id) DO UPDATE SET normalized = EXCLUDED.normalized\nRETURNING alert_id, (xmax = 0) AS es_nueva;",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }},{{ $json.source }},{{ $json.rule.id }},{{ $json.rule.name }},{{ $json.asset.host }},{{ JSON.stringify($json) }}"
+          "queryReplacement": "={{ [$json.alert_id, $json.source, $json.rule.id, $json.rule.name, $json.asset.host, JSON.stringify($json)] }}"
         }
       },
       "id": "wf01-persist",
       "name": "Registrar alerta (UPSERT)",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [480, 300],
-      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "position": [
+        480,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
       "notes": "UPSERT, nunca INSERT a ciegas. `xmax = 0` distingue inserción de actualización: si la alerta ya existía, es un reenvío y no debe volver a contenerse."
     },
     {
       "parameters": {
+        "jsCode": "// WF-01 · Restauración del payload tras la escritura.\n//\n// El nodo Postgres anterior sustituye el item por el resultado de su consulta\n// (aquí: alert_id y es_nueva). Sin restaurar, WF-02 recibiría esa fila en vez\n// de la alerta normalizada y planificaría cero consultas de inteligencia —\n// sin que nada falle visiblemente.\n//\n// De paso se aprovecha `es_nueva` del RETURNING: si el UPSERT actualizó en\n// lugar de insertar, esta alerta ya se procesó antes y es un reenvío.\n\nconst alerta = $('Fusionar criticidad').first().json;\nconst fila = $input.first().json;\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      esReenvio: fila.es_nueva === false,\n    },\n  },\n];"
+      },
+      "id": "wf01-restore",
+      "name": "Restaurar alerta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        590,
+        300
+      ],
+      "notes": "Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Sin este restaurador, aguas abajo llega la fila de la base de datos en vez de la alerta, y el flujo sigue 'con éxito' sobre datos que no son los suyos."
+    },
+    {
+      "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "cond-enriquecible",
               "leftValue": "={{ $('Fusionar criticidad').first().json.validation.enriquecible }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -90,60 +134,150 @@
       "name": "¿Tiene artefactos?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [700, 300]
+      "position": [
+        700,
+        300
+      ]
     },
     {
       "parameters": {
-        "workflowId": { "__rl": true, "value": "WF-02", "mode": "list" },
-        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
-        "options": { "waitForSubWorkflow": true }
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf02enrq",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
       },
       "id": "wf01-call-enrich",
       "name": "Invocar WF-02 Enriquecimiento",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [920, 200]
+      "position": [
+        920,
+        200
+      ]
     },
     {
       "parameters": {
-        "workflowId": { "__rl": true, "value": "WF-03", "mode": "list" },
-        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
-        "options": { "waitForSubWorkflow": true }
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf03tria",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
       },
       "id": "wf01-call-triage-direct",
       "name": "Invocar WF-03 sin enriquecer",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [920, 400],
+      "position": [
+        920,
+        400
+      ],
       "notes": "Alerta sin IP ni hash (ej. escalada de privilegios local). No hay nada que consultar a la inteligencia de amenazas; WF-03 aplica el techo 'unenrichable' y la deriva a investigación humana."
     }
   ],
   "connections": {
     "Entrada desde WF-00": {
-      "main": [[{ "node": "Normalizar", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Normalizar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Normalizar": {
-      "main": [[{ "node": "Consultar inventario de activos", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Consultar inventario de activos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Consultar inventario de activos": {
-      "main": [[{ "node": "Fusionar criticidad", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Fusionar criticidad",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Fusionar criticidad": {
-      "main": [[{ "node": "Registrar alerta (UPSERT)", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Registrar alerta (UPSERT)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Registrar alerta (UPSERT)": {
-      "main": [[{ "node": "¿Tiene artefactos?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Restaurar alerta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Tiene artefactos?": {
       "main": [
-        [{ "node": "Invocar WF-02 Enriquecimiento", "type": "main", "index": 0 }],
-        [{ "node": "Invocar WF-03 sin enriquecer", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Invocar WF-02 Enriquecimiento",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Invocar WF-03 sin enriquecer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar alerta": {
+      "main": [
+        [
+          {
+            "node": "¿Tiene artefactos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

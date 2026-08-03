@@ -1,5 +1,7 @@
 {
+  "id": "blinksecwf99errs",
   "name": "[BlinkSec] WF-99 - Manejador global de errores - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {},
@@ -7,7 +9,10 @@
       "name": "Error Trigger",
       "type": "n8n-nodes-base.errorTrigger",
       "typeVersion": 1,
-      "position": [-600, 300],
+      "position": [
+        -600,
+        300
+      ],
       "notes": "Se declara como errorWorkflow en el resto de flujos. Recibe la ejecución fallida completa, con el nodo que reventó y su mensaje."
     },
     {
@@ -18,18 +23,28 @@
       "name": "Clasificar error",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-380, 300]
+      "position": [
+        -380,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-avisar",
               "leftValue": "={{ $json.avisar }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -40,21 +55,38 @@
       "name": "¿Merece aviso?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [-160, 300]
+      "position": [
+        -160,
+        300
+      ]
     },
     {
       "parameters": {
         "select": "channel",
-        "channelId": { "__rl": true, "value": "#soc-guardia", "mode": "name" },
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-guardia",
+          "mode": "name"
+        },
         "text": "={{ $json.severidad === 'critica' ? '🔴 CRÍTICO' : '🟠' }} *Fallo en {{ $json.flujo }}*\n\nNodo: `{{ $json.nodo }}`\nTipo: `{{ $json.tipo }}`\n\n```{{ $json.mensaje }}```\n\n{{ $json.urlDepuracion ? '<' + $json.urlDepuracion + '|Ver ejecución>' : '' }}",
-        "otherOptions": { "includeLinkToWorkflow": false }
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
       },
       "id": "wf99-slack",
       "name": "Avisar a guardia",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [60, 220],
-      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "position": [
+        60,
+        220
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
       "retryOnFail": true,
       "maxTries": 3,
       "onError": "continueRegularOutput",
@@ -68,20 +100,57 @@
       "name": "Contabilizar transitorio",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [60, 400]
+      "position": [
+        60,
+        400
+      ]
     }
   ],
   "connections": {
-    "Error Trigger": { "main": [[{ "node": "Clasificar error", "type": "main", "index": 0 }]] },
-    "Clasificar error": { "main": [[{ "node": "¿Merece aviso?", "type": "main", "index": 0 }]] },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Clasificar error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar error": {
+      "main": [
+        [
+          {
+            "node": "¿Merece aviso?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "¿Merece aviso?": {
       "main": [
-        [{ "node": "Avisar a guardia", "type": "main", "index": 0 }],
-        [{ "node": "Contabilizar transitorio", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Avisar a guardia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Contabilizar transitorio",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
-  "settings": { "executionOrder": "v1" },
+  "settings": {
+    "executionOrder": "v1"
+  },
   "pinData": {},
   "meta": {
     "blinksec": {

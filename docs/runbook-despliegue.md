@@ -42,7 +42,28 @@ verificando: parar y revisar antes de seguir.
 
 ## 2. Credenciales en n8n
 
-Los nodos referencian credenciales por id. Hay que crearlas con estos nombres:
+Se pueden importar por CLI en lugar de crearlas a mano. Preparar un fichero con
+la forma siguiente (**fuera del repo**: contiene secretos en claro; n8n los
+cifra al importar con `N8N_ENCRYPTION_KEY`):
+
+```json
+[
+  { "id": "blinksec-pg", "name": "BlinkSec Postgres", "type": "postgres",
+    "data": { "host": "postgres", "port": 5432, "database": "blinksec",
+              "user": "blinksec", "password": "...", "ssl": "disable" } },
+  { "id": "blinksec-redis", "name": "BlinkSec Redis", "type": "redis",
+    "data": { "host": "redis", "port": 6379, "password": "...", "database": 0 } }
+]
+```
+
+```bash
+docker compose -f docker/docker-compose.yml cp /ruta/creds.json n8n-main:/tmp/creds.json
+docker compose -f docker/docker-compose.yml exec n8n-main n8n import:credentials --input=/tmp/creds.json
+docker compose -f docker/docker-compose.yml exec n8n-main rm -f /tmp/creds.json
+```
+
+Borrar el fichero de origen después. Los ids **deben** ser exactamente los que
+esperan los nodos:
 
 | Id | Tipo | Notas |
 |---|---|---|
@@ -62,15 +83,32 @@ Los nodos referencian credenciales por id. Hay que crearlas con estos nombres:
 npm run build
 ```
 
-Importar los ficheros de `workflows/dist/` en orden inverso de dependencia
-(WF-99 primero, WF-00 último), porque cada uno referencia al siguiente.
+```bash
+docker compose -f docker/docker-compose.yml exec n8n-main n8n import:workflow --separate --input=/workflows/dist
+```
 
-Tras importar, en cada flujo salvo WF-99: *Settings → Error Workflow → WF-99*.
-El campo `errorWorkflow` del JSON usa el nombre lógico, no el id que n8n asigna
-al importar, así que hay que reasignarlo a mano una vez.
+No hay orden de importación ni paso de enlazado manual: cada workflow lleva un
+**id determinista** (`blinksecwf00gtwy`, `blinksecwf01norm`…) y las referencias
+cruzadas apuntan directamente a esos ids. La importación es idempotente —
+ejecutarla dos veces actualiza, no duplica.
 
-Igual con los nodos *Execute Sub-workflow*: apuntan a `WF-01`, `WF-02`… y hay
-que seleccionar el flujo real en el desplegable.
+> Esto importa más de lo que parece. Sin id estable, `n8n import:workflow` crea
+> un workflow nuevo en cada importación en lugar de actualizar el existente. En
+> las pruebas de despliegue eso dejó **dos gateways**, con el antiguo todavía
+> activo atendiendo tráfico después de desplegar un arreglo de seguridad, y sin
+> ningún error visible. `npm run build` lo bloquea si falta el id.
+
+Activar el gateway (los subflujos no se activan: los invoca WF-00):
+
+```bash
+docker compose -f docker/docker-compose.yml exec n8n-main n8n update:workflow --id=blinksecwf00gtwy --active=true
+```
+
+La activación sólo surte efecto al reiniciar:
+
+```bash
+docker compose -f docker/docker-compose.yml restart n8n-main n8n-webhook
+```
 
 ## 4. Datos de dominio
 
@@ -120,7 +158,38 @@ Si aparece `401`, el secreto de `ossec.conf` no coincide con
 `BLINKSEC_HMAC_SECRET_WAZUH`. Si aparece `403`, falta la IP del manager en
 `SIEM_ALLOWLIST`.
 
-## 6. Ensayo controlado
+## 6. Verificación del gateway y de las credenciales
+
+Antes de nada, comprobar que el gateway rechaza lo que debe. Con el secreto de
+`BLINKSEC_HMAC_SECRET_WAZUH`:
+
+```bash
+docker compose -f docker/docker-compose.yml cp tools/load-test.js n8n-webhook:/tmp/lt.js
+```
+
+```bash
+docker compose -f docker/docker-compose.yml exec n8n-webhook node /tmp/lt.js http://localhost:5678/webhook/blinksec/ingest "$BLINKSEC_HMAC_SECRET_WAZUH" 20 4
+```
+
+Todas las respuestas deben ser `200`. Una petición sin firma debe dar `401`, y
+una con `X-BlinkSec-Source` desconocido, `400`.
+
+**Verificar las credenciales de inteligencia una por una.** Una clave mal
+copiada no falla de forma visible: GreyNoise y VirusTotal pueden devolver
+respuestas que el sistema interpreta como "IoC desconocido" en lugar de como
+error, y el SOAR quedaría ciego pareciendo sano (ver R-09 en `riesgos.md`).
+
+La comprobación concreta: enviar una alerta con `8.8.8.8` como `srcip` y
+confirmar en la ejecución de WF-02 que GreyNoise la clasifica como
+**servicio comercial**. Si sale "no observada", la credencial no está actuando.
+
+```sql
+SELECT verdict, score, partial_enrichment FROM blinksec.alerts ORDER BY received_at DESC LIMIT 5;
+```
+
+Con las cuatro credenciales correctas, `partial_enrichment` debe ser `false`.
+
+## 7. Ensayo controlado
 
 **Antes de conectar producción.** En laboratorio:
 
@@ -144,7 +213,7 @@ Si aparece `401`, el secreto de `ossec.conf` no coincide con
 
 Si el paso 4 o el 5 no se comportan como se describe, no conectar producción.
 
-## 7. Reversión de un despliegue
+## 8. Reversión de un despliegue
 
 Los workflows están versionados en Git como JSON:
 

@@ -138,6 +138,24 @@ function validarWorkflow(wf, fichero) {
   if (!wf.name) errores.push('falta "name"');
   if (!Array.isArray(wf.nodes) || wf.nodes.length === 0) errores.push('sin nodos');
 
+  // `active` no tiene default en el importador: sin este campo,
+  // `n8n import:workflow` aborta el lote entero con un error de constraint
+  // NOT NULL en workflow_entity. Sólo se descubre desplegando.
+  if (typeof wf.active !== 'boolean') {
+    errores.push('falta "active" (booleano): n8n import:workflow lo exige y no lo asume');
+  }
+
+  // `id` determinista. Sin él, `n8n import:workflow` no puede hacer upsert y
+  // CREA UN DUPLICADO en cada reimportación. En un SOAR eso significa acabar
+  // con dos gateways, y que el que quedó activo sea el de la versión anterior:
+  // se despliega un arreglo de seguridad y el tráfico lo sigue atendiendo el
+  // código viejo, sin ningún error visible.
+  if (!wf.id) {
+    errores.push('falta "id": sin id estable cada importación duplica el workflow en lugar de actualizarlo');
+  } else if (!/^blinksecwf\d{2}[a-z]{4}$/.test(wf.id)) {
+    errores.push(`id "${wf.id}" fuera de convención (blinksecwfNNxxxx, 16 caracteres)`);
+  }
+
   const nombres = new Set();
   for (const n of wf.nodes ?? []) {
     if (!n.name) errores.push('un nodo sin "name"');
@@ -164,6 +182,79 @@ function validarWorkflow(wf, fichero) {
     errores.push(`el nombre "${wf.name}" no sigue la convención "[BlinkSec] WF-xx - Descripción - vN"`);
   }
 
+  // Un Execute Workflow Trigger con lista de campos vacía NO propaga nada al
+  // subflujo: llega un objeto vacío y el flujo se ejecuta "con éxito" sobre
+  // datos inexistentes. En el primer despliegue real esto hacía que WF-02
+  // planificara cero consultas de inteligencia y que el veredicto saliera de
+  // la línea base, sin que nada fallara visiblemente.
+  for (const nodo of wf.nodes ?? []) {
+    if (nodo.type !== 'n8n-nodes-base.executeWorkflowTrigger') continue;
+    const fuente = nodo.parameters?.inputSource;
+    const campos = nodo.parameters?.workflowInputs?.values ?? [];
+    if (fuente !== 'passthrough' && campos.length === 0) {
+      errores.push(
+        `nodo "${nodo.name}": trigger de subflujo sin inputSource "passthrough" ni campos declarados — no recibiría datos`,
+      );
+    }
+  }
+
+  // Un SELECT de Postgres que no devuelve filas produce CERO items, y n8n
+  // detiene esa rama sin error: la ejecución queda marcada como exitosa y la
+  // alerta desaparece. Encontrado en el primer despliegue real, con el
+  // inventario de activos vacío — que es el estado normal el primer día.
+  for (const nodo of wf.nodes ?? []) {
+    if (nodo.type !== 'n8n-nodes-base.postgres') continue;
+    const q = String(nodo.parameters?.query ?? '').trim().toUpperCase();
+
+    if (q.startsWith('SELECT') && nodo.alwaysOutputData !== true) {
+      errores.push(
+        `nodo "${nodo.name}": SELECT sin alwaysOutputData — si no hay filas, la rama se detiene en silencio`,
+      );
+    }
+
+    // queryReplacement en formato "csv" separa los parámetros por comas, así
+    // que se rompe con cualquier valor que contenga una: JSON serializado,
+    // mensajes de error, descripciones de regla. El síntoma es un
+    // NodeOperationError "The input string ended unexpectedly".
+    // La forma correcta es una expresión que devuelva un array.
+    const qr = nodo.parameters?.options?.queryReplacement;
+    if (typeof qr === 'string' && qr.startsWith('=') && !/^=\{\{\s*\[/.test(qr)) {
+      errores.push(
+        `nodo "${nodo.name}": queryReplacement en formato csv — usar una expresión de array "={{ [a, b] }}"`,
+      );
+    }
+  }
+
+  // Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Si
+  // alimenta directamente a un subflujo o a un enrutador, aguas abajo llega la
+  // fila de la base de datos en vez del payload — y el flujo continúa "con
+  // éxito" sobre datos que no son los suyos. En el primer despliegue real esto
+  // hacía que WF-02 planificara cero consultas y que TODAS las alertas
+  // acabaran en "investigar", incluidas las críticas.
+  const porNombre = new Map((wf.nodes ?? []).map((n) => [n.name, n]));
+  const CONSUMIDORES_DE_PAYLOAD = new Set([
+    'n8n-nodes-base.executeWorkflow',
+    'n8n-nodes-base.switch',
+    'n8n-nodes-base.splitOut',
+  ]);
+
+  for (const [origen, conexiones] of Object.entries(wf.connections ?? {})) {
+    const nodoOrigen = porNombre.get(origen);
+    if (nodoOrigen?.type !== 'n8n-nodes-base.postgres') continue;
+
+    for (const salidas of conexiones.main ?? []) {
+      for (const destino of salidas ?? []) {
+        const nodoDestino = porNombre.get(destino.node);
+        if (nodoDestino && CONSUMIDORES_DE_PAYLOAD.has(nodoDestino.type)) {
+          errores.push(
+            `"${origen}" (Postgres) alimenta directamente a "${destino.node}": ` +
+              'intercalar un nodo Code que restaure el payload',
+          );
+        }
+      }
+    }
+  }
+
   // Antipatrón de flujo monolítico: por encima de 20 nodos, aislar un fallo
   // se vuelve inviable y la lógica debe extraerse a un subflujo.
   if ((wf.nodes ?? []).length > 20) {
@@ -173,6 +264,42 @@ function validarWorkflow(wf, fichero) {
   if (errores.length) {
     throw new Error(`${fichero}:\n  - ${errores.join('\n  - ')}`);
   }
+}
+
+/**
+ * Comprueba que toda referencia entre workflows resuelve a un id existente.
+ *
+ * n8n importa sin quejarse un flujo que apunta a un subflujo inexistente: el
+ * editor lo muestra con normalidad y el fallo sólo aparece con la primera
+ * alerta real, en forma de rama que no ejecuta nada. Para un SOAR eso es una
+ * contención que silenciosamente nunca ocurre.
+ */
+function validarReferenciasCruzadas(compilados) {
+  const conocidos = new Map(compilados.map(({ wf }) => [wf.id, wf.name]));
+  const errores = [];
+
+  for (const { fichero, wf } of compilados) {
+    const errorWf = wf.settings?.errorWorkflow;
+    if (errorWf && !conocidos.has(errorWf)) {
+      errores.push(`${fichero}: errorWorkflow "${errorWf}" no corresponde a ningún workflow del repo`);
+    }
+
+    for (const nodo of wf.nodes ?? []) {
+      if (nodo.type !== 'n8n-nodes-base.executeWorkflow') continue;
+      const destino = nodo.parameters?.workflowId?.value;
+      if (!destino) {
+        errores.push(`${fichero} → "${nodo.name}": sin workflowId`);
+      } else if (!conocidos.has(destino)) {
+        errores.push(`${fichero} → "${nodo.name}": apunta a "${destino}", que no existe`);
+      }
+    }
+  }
+
+  if (errores.length) {
+    throw new Error(`Referencias cruzadas rotas:\n  - ${errores.join('\n  - ')}`);
+  }
+
+  console.log(`\nReferencias cruzadas verificadas: ${conocidos.size} workflows enlazados entre sí.`);
 }
 
 function main() {
@@ -191,12 +318,14 @@ function main() {
   }
 
   let desactualizados = 0;
+  const compilados = [];
 
   for (const fichero of ficheros) {
     const origen = JSON.parse(fs.readFileSync(path.join(SRC, fichero), 'utf8'));
     const { wf, inyecciones } = compilarWorkflow(origen, fichero);
 
     validarWorkflow(wf, fichero);
+    compilados.push({ fichero, wf });
 
     const salida = JSON.stringify(wf, null, 2) + '\n';
     const destino = path.join(DIST, fichero);
@@ -215,6 +344,8 @@ function main() {
     }
   }
 
+  validarReferenciasCruzadas(compilados);
+
   if (modoCheck && desactualizados > 0) {
     console.error(`\n${desactualizados} workflow(s) desactualizado(s). Ejecutar: npm run build`);
     process.exit(1);
@@ -232,4 +363,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { adaptarModulo, expandir, validarWorkflow };
+module.exports = { adaptarModulo, expandir, validarWorkflow, validarReferenciasCruzadas };

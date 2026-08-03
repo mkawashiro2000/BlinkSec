@@ -20,13 +20,42 @@ SIEM ──HMAC──▶ WF-00 gateway ──▶ WF-01 normalizar ──▶ WF-0
 
 ## Estado
 
-MVP funcional. El núcleo lógico —gateway, normalización, enriquecimiento,
-scoring y planificación de contención— está implementado y cubierto por **140
-tests**. Los workflows compilan y validan estructuralmente.
+MVP funcional, **desplegado y verificado en ejecución real** sobre n8n 1.72.1
+(Docker, modo queue, Postgres + Redis). 152 tests en verde.
 
-**No verificado contra un despliegue real**: no se ha ejecutado con un n8n
-levantado, ni contra las APIs reales de los proveedores, ni con un manager de
-Wazuh. Lo que falta para producción está en [Antes de producción](#antes-de-producción).
+Verificado de extremo a extremo contra el despliegue:
+
+- Los 9 workflows importan y se enlazan entre sí sin pasos manuales.
+- El gateway acepta la firma válida y rechaza los 6 vectores de ataque
+  probados: firma incorrecta, firma ausente, cuerpo alterado, reenvío con
+  timestamp caducado, secreto de otro origen y origen desconocido.
+- El pipeline completo corre: ingesta → normalización → enriquecimiento →
+  triaje → ticketing, con la alerta persistida y el veredicto justificado
+  línea a línea.
+- **Con los proveedores de inteligencia caídos, el enriquecimiento se marca
+  como parcial y no se ejecuta ninguna contención.** Es la propiedad de
+  seguridad central del sistema y está comprobada en ejecución, no sólo en
+  test.
+- Simulacros de caída de Redis y Postgres, con recuperación automática
+  verificada.
+
+Lo que **no** está verificado: las APIs reales de inteligencia (no hay claves),
+un manager de Wazuh real, y la contención real sobre un firewall. Ver
+[Antes de producción](#antes-de-producción) y [docs/riesgos.md](docs/riesgos.md).
+
+### Rendimiento medido
+
+| Métrica | Valor | Objetivo del plan |
+|---|---|---|
+| Rendimiento | 110–140 alertas/min | 500 alertas/min |
+| Gateway p50 | ~2 000 ms | — |
+| Triaje (cómputo) | ~400 ms | — |
+| Enriquecimiento con proveedores caídos | ~23 s | — |
+
+Medido en Raspberry Pi 5 (4 núcleos ARM, 8 GB) con toda la pila en la misma
+máquina, así que es un suelo. El cuello de botella no es el cómputo del triaje
+sino los backoff de reintento de las APIs externas: la cifra de "1.5 s" del
+diseño original describe el cómputo puro, no la latencia que percibe el SOC.
 
 ## Arranque rápido
 
@@ -34,7 +63,7 @@ Wazuh. Lo que falta para producción está en [Antes de producción](#antes-de-p
 cp docker/.env.example docker/.env && chmod 600 docker/.env
 ```
 
-Rellenar `docker/.env` (cada campo indica cómo generarlo), y después:
+Rellenar `docker/.env` (cada campo indica cómo generarlo). El despliegue completo, paso a paso y con las verificaciones obligatorias, está en [docs/runbook-despliegue.md](docs/runbook-despliegue.md):
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
@@ -120,7 +149,7 @@ npm test
 | `tests/gateway/` | HMAC, replay, idempotencia; interoperabilidad real Python↔JS |
 | `tests/fixtures/` | Normalización de las tres plataformas al contrato común |
 | `tests/triage/` | Corpus etiquetado de 20 casos + matriz de confusión |
-| `tests/build/` | Que `dist/` refleja `lib/` y `scoring/` |
+| `tests/build/` | Que `dist/` refleja `lib/` y `scoring/`, y las reglas anti-fallo-silencioso |
 
 El corpus de triaje es el criterio de aceptación real: 10 falsos positivos y 10
 amenazas etiquetados a mano. La regla que no se negocia es **cero falsos
@@ -128,7 +157,7 @@ positivos auto-contenidos**.
 
 > Advertencia honesta: los pesos y el corpus los escribió la misma mano, así que
 > hoy esto es un arnés de regresión, no validación independiente. El valor real
-> llega al re-etiquetar con alertas de producción — está en la Fase 7.
+> llega al re-etiquetar con alertas de producción.
 
 ## Antes de producción
 
@@ -137,15 +166,19 @@ positivos auto-contenidos**.
    automatiza.
 2. **Revisar `blinksec.ip_allowlist`.** Añadir proxies, VPN, escáneres de
    vulnerabilidades y rangos de oficina. Los RFC1918 vienen precargados.
-3. **Sustituir los endpoints de ejemplo**: `wazuh.example.com`,
+3. **Verificar cada credencial de inteligencia una por una.** Una clave mal
+   copiada no falla de forma visible: el sistema puntuaría todo como "IoC
+   desconocido" y quedaría ciego pareciendo sano (R-09). El runbook indica la
+   comprobación concreta.
+4. **Sustituir los endpoints de ejemplo**: `wazuh.example.com`,
    `thehive.example.com` y `soar.example.com` aparecen en workflows e
    integraciones.
-4. **Validar el nodo Redis de WF-00.** La idempotencia necesita semántica
+5. **Validar el nodo Redis de WF-00.** La idempotencia necesita semántica
    SETNX; según la versión del nodo puede requerir el patrón alternativo de
    `docs/runbook-idempotencia.md`.
-5. **Ensayo de contención en laboratorio** antes de conectar producción:
+6. **Ensayo de contención en laboratorio** antes de conectar producción:
    bloquear una IP de prueba, verificar el registro, verificar la reversión.
-6. **Re-etiquetar el corpus** con 100+ alertas reales y recalcular la matriz.
+7. **Re-etiquetar el corpus** con 100+ alertas reales y recalcular la matriz.
 
 Los riesgos abiertos y las excepciones conscientes al modelo de amenaza están
 en [docs/riesgos.md](docs/riesgos.md).

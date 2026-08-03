@@ -1,13 +1,21 @@
 {
+  "id": "blinksecwf04cont",
   "name": "[BlinkSec] WF-04 - Contencion - v1",
+  "active": false,
   "nodes": [
     {
-      "parameters": { "workflowInputs": { "values": [] } },
+      "parameters": {
+        "inputSource": "passthrough"
+      },
       "id": "wf04-trigger",
       "name": "Entrada desde WF-03",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
-      "position": [-620, 300]
+      "position": [
+        -620,
+        300
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -17,18 +25,28 @@
       "name": "Planificar contención",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-400, 300]
+      "position": [
+        -400,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-acciones",
               "leftValue": "={{ $json.sinAcciones }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -39,18 +57,28 @@
       "name": "¿Hay acciones?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [-180, 300]
+      "position": [
+        -180,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-aprobacion",
               "leftValue": "={{ $json.plan.requiresApproval }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -61,31 +89,53 @@
       "name": "¿Requiere aprobación?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [40, 220]
+      "position": [
+        40,
+        220
+      ]
     },
     {
       "parameters": {
-        "workflowId": { "__rl": true, "value": "WF-05", "mode": "list" },
-        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
-        "options": { "waitForSubWorkflow": true }
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf05hitl",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
       },
       "id": "wf04-call-hitl",
       "name": "Invocar WF-05 Human-in-the-Loop",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [260, 120],
+      "position": [
+        260,
+        120
+      ],
       "notes": "WF-05 suspende la ejecución en un nodo Wait hasta que un analista pulse el botón en Slack. Devuelve { aprobado: bool, aprobadoPor: string }."
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-aprobado",
               "leftValue": "={{ $json.aprobado }}",
               "rightValue": true,
-              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -96,18 +146,26 @@
       "name": "¿Aprobado por un humano?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [480, 120]
+      "position": [
+        480,
+        120
+      ]
     },
     {
       "parameters": {
         "fieldToSplitOut": "plan.actions",
-        "options": { "destinationFieldName": "accion" }
+        "options": {
+          "destinationFieldName": "accion"
+        }
       },
       "id": "wf04-split",
       "name": "Separar acciones",
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
-      "position": [700, 300]
+      "position": [
+        700,
+        300
+      ]
     },
     {
       "parameters": {
@@ -120,15 +178,28 @@
         "jsonBody": "={{ JSON.stringify($json.accion.request.body) }}",
         "options": {
           "timeout": 15000,
-          "response": { "response": { "fullResponse": true, "neverError": true } }
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
         }
       },
       "id": "wf04-execute",
       "name": "Ejecutar contención",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [920, 300],
-      "credentials": { "httpHeaderAuth": { "id": "blinksec-wazuh", "name": "Wazuh API" } },
+      "position": [
+        920,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-wazuh",
+          "name": "Wazuh API"
+        }
+      },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
@@ -140,28 +211,62 @@
         "operation": "executeQuery",
         "query": "INSERT INTO blinksec.containment_log\n  (alert_id, action_type, target, platform, undo_payload, approved_by, expires_at)\nVALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz);",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }},{{ $json.accion.action_type }},{{ $json.accion.target }},{{ $json.accion.platform }},{{ JSON.stringify($json.accion.undo_payload) }},{{ $json.aprobadoPor ?? null }},{{ $json.accion.expires_at }}"
+          "queryReplacement": "={{ [$json.alert_id, $json.accion.action_type, $json.accion.target, $json.accion.platform, JSON.stringify($json.accion.undo_payload), $json.aprobadoPor ?? null, $json.accion.expires_at] }}"
         }
       },
       "id": "wf04-log",
       "name": "Registrar en containment_log",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1140, 300],
-      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "position": [
+        1140,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
       "notes": "Regla de oro: ninguna contención existe sin su undo_payload y su expires_at registrados. WF-07 recorre esta tabla y propone las reversiones vencidas."
     },
     {
       "parameters": {
-        "workflowId": { "__rl": true, "value": "WF-06", "mode": "list" },
-        "workflowInputs": { "mappingMode": "defineBelow", "value": {} },
-        "options": { "waitForSubWorkflow": false }
+        "jsCode": "// WF-04 · Restauración del payload tras registrar la contención.\n//\n// El INSERT en containment_log deja su propio resultado en el item. WF-06\n// necesita la alerta completa con su plan para componer el ticket: sin\n// restaurar, el ticket saldría vacío de contexto justo en el caso que más\n// importa documentar, el de una contención ya ejecutada.\n\nconst base = $('Planificar contención').first().json;\n\nreturn [\n  {\n    json: {\n      ...base,\n      // Se conserva quién aprobó, que sólo existe si pasó por WF-05.\n      aprobadoPor: $('Planificar contención').first().json.aprobadoPor ?? null,\n    },\n  },\n];"
+      },
+      "id": "wf04-restore",
+      "name": "Restaurar alerta contenida",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1250,
+        300
+      ],
+      "notes": "Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Sin este restaurador, WF-06 recibiría la fila insertada en lugar de la alerta."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "blinksecwf06tick",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {}
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
       },
       "id": "wf04-call-ticket",
       "name": "Invocar WF-06 Ticketing",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [1360, 300]
+      "position": [
+        1360,
+        300
+      ]
     },
     {
       "parameters": {
@@ -171,50 +276,148 @@
       "name": "Registrar omisión",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [40, 440]
+      "position": [
+        40,
+        440
+      ]
     }
   ],
   "connections": {
     "Entrada desde WF-03": {
-      "main": [[{ "node": "Planificar contención", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Planificar contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Planificar contención": {
-      "main": [[{ "node": "¿Hay acciones?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "¿Hay acciones?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Hay acciones?": {
       "main": [
-        [{ "node": "¿Requiere aprobación?", "type": "main", "index": 0 }],
-        [{ "node": "Registrar omisión", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "¿Requiere aprobación?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar omisión",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "¿Requiere aprobación?": {
       "main": [
-        [{ "node": "Invocar WF-05 Human-in-the-Loop", "type": "main", "index": 0 }],
-        [{ "node": "Separar acciones", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Invocar WF-05 Human-in-the-Loop",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Separar acciones",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Invocar WF-05 Human-in-the-Loop": {
-      "main": [[{ "node": "¿Aprobado por un humano?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "¿Aprobado por un humano?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Aprobado por un humano?": {
       "main": [
-        [{ "node": "Separar acciones", "type": "main", "index": 0 }],
-        [{ "node": "Registrar omisión", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Separar acciones",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar omisión",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Separar acciones": {
-      "main": [[{ "node": "Ejecutar contención", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Ejecutar contención",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Ejecutar contención": {
-      "main": [[{ "node": "Registrar en containment_log", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Registrar en containment_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Registrar en containment_log": {
-      "main": [[{ "node": "Invocar WF-06 Ticketing", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Restaurar alerta contenida",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restaurar alerta contenida": {
+      "main": [
+        [
+          {
+            "node": "Invocar WF-06 Ticketing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

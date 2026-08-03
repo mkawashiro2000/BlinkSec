@@ -1,11 +1,11 @@
 {
+  "id": "blinksecwf03tria",
   "name": "[BlinkSec] WF-03 - Triaje y scoring - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
-        "workflowInputs": {
-          "values": []
-        }
+        "inputSource": "passthrough"
       },
       "id": "wf03-trigger",
       "name": "Entrada desde WF-02",
@@ -14,7 +14,8 @@
       "position": [
         -600,
         300
-      ]
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -37,7 +38,8 @@
         }
       },
       "onError": "continueErrorOutput",
-      "notes": "Si esta consulta falla NO se continúa: sin allowlist el sistema podría bloquear el proxy corporativo o la VPN. Es el único fallo de base de datos que detiene el flujo por completo."
+      "notes": "Si esta consulta falla NO se continúa: sin allowlist el sistema podría bloquear el proxy corporativo o la VPN. Es el único fallo de base de datos que detiene el flujo por completo. | alwaysOutputData es OBLIGATORIO: un SELECT sin filas devuelve cero items y n8n detiene la rama en silencio, reportando la ejecución como exitosa. Sin esto, con el inventario vacío se descartan TODAS las alertas sin dejar rastro.",
+      "alwaysOutputData": true
     },
     {
       "parameters": {
@@ -57,7 +59,7 @@
         "operation": "executeQuery",
         "query": "UPDATE blinksec.alerts\nSET score = $2, verdict = $3, partial_enrichment = $4, processed_at = now()\nWHERE alert_id = $1;",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }},{{ $json.triage.score }},{{ $json.triage.verdict }},{{ $json.enrichment?._meta?.partial ?? false }}"
+          "queryReplacement": "={{ [$json.alert_id, $json.triage.score, $json.triage.verdict, $json.enrichment?._meta?.partial ?? false] }}"
         }
       },
       "id": "wf03-persist",
@@ -75,6 +77,20 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WF-03 · Restauración del payload tras persistir el veredicto.\n//\n// Mismo motivo que en WF-01: el UPDATE de Postgres deja su propio resultado\n// en el item. Sin restaurar, el Switch evaluaría $json.triage.verdict sobre\n// un objeto que no lo tiene, caería siempre por la rama de respaldo y TODA\n// alerta acabaría en \"investigar\" — incluidas las críticas.\n\nreturn [{ json: $('Puntuar y decidir').first().json }];"
+      },
+      "id": "wf03-restore",
+      "name": "Restaurar veredicto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        170,
+        300
+      ],
+      "notes": "Un nodo Postgres SUSTITUYE el item por el resultado de su consulta. Sin este restaurador, aguas abajo llega la fila de la base de datos en vez de la alerta, y el flujo sigue 'con éxito' sobre datos que no son los suyos."
     },
     {
       "parameters": {
@@ -205,7 +221,7 @@
       "parameters": {
         "workflowId": {
           "__rl": true,
-          "value": "WF-06",
+          "value": "blinksecwf06tick",
           "mode": "list"
         },
         "workflowInputs": {
@@ -229,7 +245,7 @@
       "parameters": {
         "workflowId": {
           "__rl": true,
-          "value": "WF-04",
+          "value": "blinksecwf04cont",
           "mode": "list"
         },
         "workflowInputs": {
@@ -254,7 +270,7 @@
         "operation": "executeQuery",
         "query": "INSERT INTO blinksec.metrics (alert_id, e2e_ms, enrich_ms, providers_ok, providers_failed)\nVALUES ($1, $2, $3, $4, $5);",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }},{{ $json.timings?.e2eMs ?? 0 }},{{ $json.timings?.enrichMs ?? 0 }},{{ $json.enrichment?._meta?.providersOk ?? 0 }},{{ $json.enrichment?._meta?.providersFailed ?? 0 }}"
+          "queryReplacement": "={{ [$('Puntuar y decidir').first().json.alert_id, $('Puntuar y decidir').first().json.timings?.e2eMs ?? 0, $('Puntuar y decidir').first().json.timings?.enrichMs ?? 0, $('Puntuar y decidir').first().json.enrichment?._meta?.providersOk ?? 0, $('Puntuar y decidir').first().json.enrichment?._meta?.providersFailed ?? 0] }}"
         }
       },
       "id": "wf03-metrics",
@@ -313,7 +329,7 @@
       "main": [
         [
           {
-            "node": "Bifurcar por veredicto",
+            "node": "Restaurar veredicto",
             "type": "main",
             "index": 0
           }
@@ -355,11 +371,22 @@
           }
         ]
       ]
+    },
+    "Restaurar veredicto": {
+      "main": [
+        [
+          {
+            "node": "Bifurcar por veredicto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

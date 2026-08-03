@@ -117,8 +117,117 @@ en WF-06 antes de escribir el ticket.
 **Riesgo residual.** El payload crudo sí pasa por WF-00 y WF-01 y queda en la
 ejecución durante la ventana de retención. Ver `runbook-privacidad.md`.
 
-## R-08 · Sin pruebas de carga (ABIERTO)
+## R-08 · Rendimiento muy por debajo del objetivo (MEDIDO, ABIERTO)
 
-Nada de esto se ha ejecutado bajo volumen. El modo queue con 2 workers y
-concurrencia 10 debería sostener el objetivo de 500 alertas/min, pero es una
-estimación, no una medición. Fase 7.
+**Ya no es una estimación.** Medido contra el despliegue real:
+
+| Métrica | Valor |
+|---|---|
+| Rendimiento | **110–140 alertas/min** |
+| Latencia del gateway p50 | ~2 000 ms |
+| Latencia del gateway p95 | ~4 000 ms |
+| Objetivo del plan | 500 alertas/min |
+
+Hardware: Raspberry Pi 5, 4 núcleos ARM, 8 GB, con Postgres, Redis, n8n-main,
+n8n-webhook y 2 workers **en la misma máquina**. No es hardware de producción,
+así que la cifra es un suelo, no un techo.
+
+Dónde se va el tiempo, medido por flujo:
+
+- **WF-02 enriquecimiento: ~23 s** con los cuatro proveedores fallando. Domina
+  todo lo demás. Es la suma de los backoff de reintento — y el de VirusTotal
+  son 20 s × 3 intentos por diseño, porque reintentar antes garantiza otro 429.
+  Bajo caída total de proveedores, el backoff correcto para las cuotas es
+  catastrófico para el rendimiento.
+- **WF-00 gateway: ~1,5 s**, del cual una parte es persistir los datos de
+  ejecución en Postgres.
+- **WF-03 triaje: ~0,4 s**. El cómputo de scoring es irrelevante en el
+  presupuesto, justo como se anticipaba.
+
+**Conclusión sobre la cifra de "1.5 segundos" del documento original**: no se
+corresponde con nada medible de extremo a extremo. El cómputo puro de decisión
+sí está en ese orden o por debajo, pero la latencia que percibe el SOC la
+dominan las APIs externas.
+
+**Acciones pendientes**: acotar el peor caso de WF-02 (presupuesto total de
+reintentos, no por nodo); medir en hardware x86 representativo; evaluar
+`EXECUTIONS_DATA_SAVE_ON_SUCCESS=none` para quitar la escritura de ejecución
+del camino crítico.
+
+## R-09 · Una clave de API ausente puede parecer un dato válido (ABIERTO)
+
+Descubierto al medir sin claves configuradas. Con las cuatro credenciales de
+inteligencia ausentes, el enriquecimiento reportó **3 proveedores disponibles
+de 4**: GreyNoise y VirusTotal devolvieron respuestas que los parsers
+interpretan legítimamente como "IoC no observado" / "desconocido", no como
+fallo.
+
+**Por qué importa.** Un despliegue con una clave mal copiada no fallaría de
+forma visible: puntuaría todas las alertas como si la inteligencia hubiera
+respondido "no sé nada de esta IP". El sistema parecería sano y estaría ciego.
+
+**Mitigación actual.** Los códigos 401 y 403 sí se tratan como no disponible, y
+el paso 6 del runbook de despliegue obliga a verificar cada credencial antes de
+conectar producción.
+
+**Cómo cerrarlo.** Un flujo de comprobación de credenciales que consulte un IoC
+conocido de cada proveedor (por ejemplo 8.8.8.8, que GreyNoise debe clasificar
+como servicio comercial) y avise si la respuesta no es la esperada.
+
+## R-11 · Una caída de Redis o Postgres pierde alertas (MEDIDO, ABIERTO)
+
+Simulacros ejecutados contra el despliegue real, matando cada dependencia en
+caliente mientras entraba tráfico:
+
+| Dependencia caída | Comportamiento observado | Consecuencia |
+|---|---|---|
+| **Redis** | El proceso de webhooks **se cierra solo a los 10 s** (`Exiting process due to Redis connection error`). Las peticiones fallan a nivel de conexión. | Alertas perdidas en el cable, **sin ninguna traza en BlinkSec** |
+| **Postgres** | El webhook sigue en pie y responde **500** con 5–10 s de latencia | Alertas perdidas, pero el error sí queda registrado |
+
+**Recuperación**: automática en ambos casos. Al volver la dependencia, el
+proceso de webhooks arranca de nuevo por sí solo y vuelve a aceptar tráfico.
+Verificado.
+
+**Por qué importa más de lo que parece.** Wazuh **no reintenta** las
+integraciones: lo que no entra en el momento, no entra nunca. Una caída de
+Redis de dos minutos es una ventana ciega de dos minutos en el SOC, y en el
+caso de Redis ni siquiera queda constancia del lado del SOAR — sólo en el log
+del manager de Wazuh.
+
+El caso de Redis es peor por partida doble: el fallo es silencioso desde la
+perspectiva del SOAR, y es precisamente el modo en que un atacante querría
+tumbarlo antes de actuar.
+
+**Acciones pendientes**:
+
+- Monitorización externa del endpoint de ingesta (no autoalojada en la misma
+  máquina) que alerte si deja de responder.
+- Vigilar `integrations-blinksec.log` en el manager de Wazuh: un pico de fallos
+  de red ahí es la única señal de una ventana ciega.
+- Evaluar un buffer duradero delante del webhook para absorber caídas cortas.
+- Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
+  en un punto único de fallo para la ingesta.
+
+## R-10 · Modos de fallo silencioso de n8n (CERRADOS, con guardas)
+
+El primer despliegue real destapó cinco fallos que **no producían ningún
+error**: la ejecución se marcaba como exitosa y las alertas se perdían o se
+puntuaban sobre datos vacíos. Todos están corregidos y con una regla que los
+bloquea en compilación (`tools/build-workflows.js`), pero se dejan escritos
+porque son la clase de fallo que reaparece al añadir un nodo nuevo:
+
+1. **`rawBody` no existe.** n8n 1.72 entrega el cuerpo crudo como adjunto
+   binario en base64, no en `$json.rawBody`. Sin esto, todo 401.
+2. **Sin `id` estable, cada importación duplica el workflow.** Quedó activo el
+   gateway de la versión anterior tras desplegar un arreglo de seguridad.
+3. **Un `SELECT` sin filas detiene la rama en silencio.** Con el inventario de
+   activos vacío se descartaban todas las alertas.
+4. **`queryReplacement` separa por comas**, así que se rompe con JSON
+   serializado.
+5. **Un nodo Postgres sustituye el item por su resultado.** Aguas abajo llegaba
+   la fila de la base de datos en vez de la alerta, y el triaje caía siempre a
+   "investigar" — incluidos los casos críticos.
+
+El patrón común: **n8n prefiere continuar antes que fallar**. Para un SOAR eso
+es peligroso, porque un flujo que "termina bien" sin haber hecho nada es
+indistinguible de uno que funciona.

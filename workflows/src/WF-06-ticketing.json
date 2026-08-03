@@ -1,13 +1,21 @@
 {
+  "id": "blinksecwf06tick",
   "name": "[BlinkSec] WF-06 - Ticketing y notificacion - v1",
+  "active": false,
   "nodes": [
     {
-      "parameters": { "workflowInputs": { "values": [] } },
+      "parameters": {
+        "inputSource": "passthrough"
+      },
       "id": "wf06-trigger",
       "name": "Entrada",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
-      "position": [-600, 300]
+      "position": [
+        -600,
+        300
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -17,20 +25,33 @@
       "name": "Componer ticket",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-380, 300]
+      "position": [
+        -380,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "executeQuery",
         "query": "SELECT ticket_ref FROM blinksec.alerts WHERE alert_id = $1 AND ticket_ref IS NOT NULL;",
-        "options": { "queryReplacement": "={{ $json.alert_id }}" }
+        "options": {
+          "queryReplacement": "={{ [$json.alert_id] }}"
+        }
       },
       "id": "wf06-check-existing",
       "name": "¿Ya tiene ticket?",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [-160, 300],
-      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "position": [
+        -160,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
       "onError": "continueRegularOutput",
       "alwaysOutputData": true,
       "notes": "Idempotencia de ticketing. Sin esta comprobación, una alerta reenviada abre un segundo ticket — y en una tormenta de alertas el SOC acaba con cientos de duplicados que tapan los incidentes reales."
@@ -38,13 +59,20 @@
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-nuevo",
               "leftValue": "={{ $json.ticket_ref }}",
               "rightValue": "",
-              "operator": { "type": "string", "operation": "notExists", "singleValue": true }
+              "operator": {
+                "type": "string",
+                "operation": "notExists",
+                "singleValue": true
+              }
             }
           ],
           "combinator": "and"
@@ -55,7 +83,10 @@
       "name": "¿Ticket nuevo?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [60, 300]
+      "position": [
+        60,
+        300
+      ]
     },
     {
       "parameters": {
@@ -68,15 +99,28 @@
         "jsonBody": "={{ JSON.stringify({ type: 'blinksec', source: $('Componer ticket').first().json.alertaSaneada.source, sourceRef: $('Componer ticket').first().json.alert_id, title: $('Componer ticket').first().json.titulo, description: $('Componer ticket').first().json.descripcion, severity: $('Componer ticket').first().json.severidad, tags: $('Componer ticket').first().json.tags, observables: $('Componer ticket').first().json.observables }) }}",
         "options": {
           "timeout": 15000,
-          "response": { "response": { "fullResponse": true, "neverError": true } }
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
         }
       },
       "id": "wf06-thehive",
       "name": "Crear alerta en TheHive",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [280, 220],
-      "credentials": { "httpHeaderAuth": { "id": "blinksec-thehive", "name": "TheHive API" } },
+      "position": [
+        280,
+        220
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "blinksec-thehive",
+          "name": "TheHive API"
+        }
+      },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
@@ -88,15 +132,23 @@
         "operation": "executeQuery",
         "query": "UPDATE blinksec.alerts SET ticket_ref = $2 WHERE alert_id = $1;",
         "options": {
-          "queryReplacement": "={{ $('Componer ticket').first().json.alert_id }},{{ $json.body?._id ?? 'sin-referencia' }}"
+          "queryReplacement": "={{ [$('Componer ticket').first().json.alert_id, $json.body?._id ?? 'sin-referencia'] }}"
         }
       },
       "id": "wf06-save-ref",
       "name": "Guardar referencia",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [500, 220],
-      "credentials": { "postgres": { "id": "blinksec-pg", "name": "BlinkSec Postgres" } },
+      "position": [
+        500,
+        220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "blinksec-pg",
+          "name": "BlinkSec Postgres"
+        }
+      },
       "onError": "continueRegularOutput"
     },
     {
@@ -107,46 +159,132 @@
       "name": "Contingencia: guardar para reproceso",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [280, 420]
+      "position": [
+        280,
+        420
+      ]
     },
     {
       "parameters": {
         "select": "channel",
-        "channelId": { "__rl": true, "value": "#soc-alerts", "mode": "name" },
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-alerts",
+          "mode": "name"
+        },
         "text": "={{ $('Componer ticket').first().json.verdict === 'critical' ? '🔴' : '🟡' }} *{{ $('Componer ticket').first().json.titulo }}*\n\nPuntuación: {{ $('Componer ticket').first().json.score }}/100 · `{{ $('Componer ticket').first().json.alert_id }}`",
-        "otherOptions": { "includeLinkToWorkflow": false }
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
       },
       "id": "wf06-notify",
       "name": "Notificar al SOC",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [720, 300],
-      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "position": [
+        720,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
       "onError": "continueRegularOutput",
       "notes": "Última acción del flujo y la menos crítica. onError=continue: no notificar es molesto; abortar el flujo aquí borraría la traza de todo lo anterior."
     }
   ],
   "connections": {
-    "Entrada": { "main": [[{ "node": "Componer ticket", "type": "main", "index": 0 }]] },
-    "Componer ticket": { "main": [[{ "node": "¿Ya tiene ticket?", "type": "main", "index": 0 }]] },
-    "¿Ya tiene ticket?": { "main": [[{ "node": "¿Ticket nuevo?", "type": "main", "index": 0 }]] },
+    "Entrada": {
+      "main": [
+        [
+          {
+            "node": "Componer ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Componer ticket": {
+      "main": [
+        [
+          {
+            "node": "¿Ya tiene ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Ya tiene ticket?": {
+      "main": [
+        [
+          {
+            "node": "¿Ticket nuevo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "¿Ticket nuevo?": {
-      "main": [[{ "node": "Crear alerta en TheHive", "type": "main", "index": 0 }], []]
+      "main": [
+        [
+          {
+            "node": "Crear alerta en TheHive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
     },
     "Crear alerta en TheHive": {
       "main": [
-        [{ "node": "Guardar referencia", "type": "main", "index": 0 }],
-        [{ "node": "Contingencia: guardar para reproceso", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Guardar referencia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Contingencia: guardar para reproceso",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
-    "Guardar referencia": { "main": [[{ "node": "Notificar al SOC", "type": "main", "index": 0 }]] },
+    "Guardar referencia": {
+      "main": [
+        [
+          {
+            "node": "Notificar al SOC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Contingencia: guardar para reproceso": {
-      "main": [[{ "node": "Notificar al SOC", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Notificar al SOC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

@@ -1,11 +1,11 @@
 {
+  "id": "blinksecwf06tick",
   "name": "[BlinkSec] WF-06 - Ticketing y notificacion - v1",
+  "active": false,
   "nodes": [
     {
       "parameters": {
-        "workflowInputs": {
-          "values": []
-        }
+        "inputSource": "passthrough"
       },
       "id": "wf06-trigger",
       "name": "Entrada",
@@ -14,7 +14,8 @@
       "position": [
         -600,
         300
-      ]
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -34,7 +35,7 @@
         "operation": "executeQuery",
         "query": "SELECT ticket_ref FROM blinksec.alerts WHERE alert_id = $1 AND ticket_ref IS NOT NULL;",
         "options": {
-          "queryReplacement": "={{ $json.alert_id }}"
+          "queryReplacement": "={{ [$json.alert_id] }}"
         }
       },
       "id": "wf06-check-existing",
@@ -131,7 +132,7 @@
         "operation": "executeQuery",
         "query": "UPDATE blinksec.alerts SET ticket_ref = $2 WHERE alert_id = $1;",
         "options": {
-          "queryReplacement": "={{ $('Componer ticket').first().json.alert_id }},{{ $json.body?._id ?? 'sin-referencia' }}"
+          "queryReplacement": "={{ [$('Componer ticket').first().json.alert_id, $json.body?._id ?? 'sin-referencia'] }}"
         }
       },
       "id": "wf06-save-ref",
@@ -283,7 +284,7 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {

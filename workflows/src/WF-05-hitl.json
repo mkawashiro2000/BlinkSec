@@ -1,13 +1,21 @@
 {
+  "id": "blinksecwf05hitl",
   "name": "[BlinkSec] WF-05 - Human in the loop - v1",
+  "active": false,
   "nodes": [
     {
-      "parameters": { "workflowInputs": { "values": [] } },
+      "parameters": {
+        "inputSource": "passthrough"
+      },
       "id": "wf05-trigger",
       "name": "Entrada desde WF-04",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
-      "position": [-600, 300]
+      "position": [
+        -600,
+        300
+      ],
+      "notes": "inputSource=passthrough es OBLIGATORIO. Con una lista de campos vacía, el Execute Workflow Trigger no propaga NADA al subflujo: llega un objeto vacío y el flujo se ejecuta 'con éxito' sobre datos inexistentes. Encontrado en el primer despliegue real — WF-02 planificaba cero consultas de inteligencia."
     },
     {
       "parameters": {
@@ -17,12 +25,19 @@
       "name": "Construir mensaje Slack",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-380, 300]
+      "position": [
+        -380,
+        300
+      ]
     },
     {
       "parameters": {
         "select": "channel",
-        "channelId": { "__rl": true, "value": "#soc-alerts", "mode": "name" },
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-alerts",
+          "mode": "name"
+        },
         "text": "=Aprobación requerida para contener {{ $json.asset.host }}",
         "otherOptions": {
           "includeLinkToWorkflow": false,
@@ -33,8 +48,16 @@
       "name": "Enviar a Slack",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [-160, 300],
-      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "position": [
+        -160,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
       "retryOnFail": true,
       "maxTries": 3,
       "notes": "Si Slack está caído no se puede pedir aprobación. onError deja seguir para que el nodo Wait expire y aplique el comportamiento fail-safe: no ejecutar nada.",
@@ -54,7 +77,10 @@
       "name": "Esperar decisión humana",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [60, 300],
+      "position": [
+        60,
+        300
+      ],
       "webhookId": "blinksec-hitl",
       "notes": "La ejecución queda suspendida en el servidor, sin consumir un worker. Al expirar los 15 min el flujo continúa SIN decisión — y la rama de abajo interpreta eso como rechazo. Fail-safe, no fail-open."
     },
@@ -66,18 +92,27 @@
       "name": "Interpretar decisión",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [280, 300]
+      "position": [
+        280,
+        300
+      ]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "version": 2 },
+          "options": {
+            "caseSensitive": true,
+            "version": 2
+          },
           "conditions": [
             {
               "id": "c-timeout",
               "leftValue": "={{ $json.decision }}",
               "rightValue": "timeout",
-              "operator": { "type": "string", "operation": "equals" }
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
             }
           ],
           "combinator": "and"
@@ -88,12 +123,19 @@
       "name": "¿Expiró sin respuesta?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [500, 300]
+      "position": [
+        500,
+        300
+      ]
     },
     {
       "parameters": {
         "select": "channel",
-        "channelId": { "__rl": true, "value": "#soc-guardia", "mode": "name" },
+        "channelId": {
+          "__rl": true,
+          "value": "#soc-guardia",
+          "mode": "name"
+        },
         "text": "=⏰ Escalado: la aprobación para `{{ $json.asset.host }}` (alert_id `{{ $json.alert_id }}`) expiró sin respuesta en 15 min. *No se ha ejecutado ninguna contención.* Puntuación {{ $json.triage.score }}/100.",
         "otherOptions": {}
       },
@@ -101,34 +143,91 @@
       "name": "Escalar a guardia",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [720, 200],
-      "credentials": { "slackApi": { "id": "blinksec-slack", "name": "BlinkSec Slack" } },
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "blinksec-slack",
+          "name": "BlinkSec Slack"
+        }
+      },
       "onError": "continueRegularOutput"
     }
   ],
   "connections": {
     "Entrada desde WF-04": {
-      "main": [[{ "node": "Construir mensaje Slack", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Construir mensaje Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Construir mensaje Slack": {
-      "main": [[{ "node": "Enviar a Slack", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Enviar a Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Enviar a Slack": {
-      "main": [[{ "node": "Esperar decisión humana", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Esperar decisión humana",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Esperar decisión humana": {
-      "main": [[{ "node": "Interpretar decisión", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Interpretar decisión",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Interpretar decisión": {
-      "main": [[{ "node": "¿Expiró sin respuesta?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "¿Expiró sin respuesta?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "¿Expiró sin respuesta?": {
-      "main": [[{ "node": "Escalar a guardia", "type": "main", "index": 0 }], []]
+      "main": [
+        [
+          {
+            "node": "Escalar a guardia",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
     }
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "WF-99"
+    "errorWorkflow": "blinksecwf99errs"
   },
   "pinData": {},
   "meta": {
