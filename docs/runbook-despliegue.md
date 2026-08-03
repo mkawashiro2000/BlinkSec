@@ -21,6 +21,18 @@ Ajustar `SIEM_ALLOWLIST` (IPs de los colectores) y `MGMT_ALLOWLIST` (desde
 dónde se abre el editor). El editor de n8n expuesto a internet es ejecución
 remota de código con pasos extra.
 
+> **Si cambias cualquier valor de `docker/.env` después de que los
+> contenedores ya están arriba**, `docker compose restart` **no basta**: sólo
+> reinicia el proceso con las variables que el contenedor ya tenía cargadas
+> al crearse, no relee el `.env`. El síntoma es un 403/comportamiento viejo
+> que persiste sin ningún error visible — se probó en la práctica cambiando
+> `MGMT_ALLOWLIST` y el contenedor de Caddy siguió aplicando el valor
+> anterior tras el restart. Hace falta recrear el contenedor:
+> ```bash
+> docker compose up -d --force-recreate caddy
+> ```
+> (o el servicio que corresponda; para n8n-main/webhook/worker aplica igual).
+
 Antes de levantar nada, comprobar que `docker-compose.yml` propaga al
 contenedor de Caddy toda variable que el `Caddyfile` referencia:
 
