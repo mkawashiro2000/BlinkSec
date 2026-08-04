@@ -44,17 +44,19 @@ retirada:
   en SIEM` (que marcaba `Ignored` en TheHive para los falsos positivos);
   esa rama ahora va directo a registrar métricas.
 
-**Riesgo real heredado, no introducido por esta retirada**: el
-`undo_payload` de Cloudflare declara `requires: ['RULE_ID']` porque el id
-de la regla creada no se conoce hasta la respuesta de la API — pero
-**ningún nodo del workflow sustituye ese `{{RULE_ID}}` todavía** antes de
-persistir en `containment_log`. Esto ya era cierto antes de esta sesión
-(Cloudflare nunca se ejercitó de verdad, sólo se ensayó `wazuh_ar` contra
-el mock), pero ahora que Cloudflare es la única plataforma activa, el
-gap es inmediatamente relevante: sin esa sustitución, WF-07 intentará
-revertir literalmente `.../rules/{{RULE_ID}}` y fallará siempre. Pendiente
-de implementar antes de ejercitar la contención contra Cloudflare real —
-ver también el punto 6 de "Antes de producción" en el README.
+**Riesgo heredado, ya cerrado.** El `undo_payload` de Cloudflare declara
+`requires: ['RULE_ID']` porque el id de la regla creada no se conoce hasta
+la respuesta de la API — al retirar Wazuh, ningún nodo del workflow
+sustituía ese `{{RULE_ID}}` antes de persistir en `containment_log` (el
+gap ya existía: Cloudflare nunca se había ejercitado de verdad, sólo
+`wazuh_ar` contra el mock). Resuelto: `lib/containment.js` añade
+`resolveRuleId(accion, ruleId)`, que sustituye el placeholder con el id
+real que devuelve Cloudflare (`body.result.id`) y limpia `requires`; si la
+petición de creación falló y no hay id, la acción se deja intacta —
+mejor no revertir nada que revertir a ciegas. Se invoca en el nodo
+"Restaurar tras ejecutar" de WF-08, justo después del HTTP Request que
+crea la regla y antes de "Registrar en containment_log". Cubierto por tres
+tests en `tests/triage/containment.test.js`.
 
 Todo esto se verificó con `npm run verify` (155/155 tests) y con el
 compilador de workflows (`node tools/build-workflows.js`) tras cada

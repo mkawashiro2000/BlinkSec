@@ -10,7 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { planContainment, blockIp, isolateHost, revokeSession, dueForReversal, ContainmentPlanError } = require('../../lib/containment.js');
+const { planContainment, blockIp, isolateHost, revokeSession, dueForReversal, resolveRuleId, ContainmentPlanError } = require('../../lib/containment.js');
 
 const AHORA = Date.UTC(2026, 7, 2, 12, 0, 0);
 
@@ -190,4 +190,28 @@ test('dueForReversal selecciona sólo lo vencido y sin revertir', () => {
 test('dueForReversal tolera una lista vacía o ausente', () => {
   assert.deepEqual(dueForReversal([], AHORA), []);
   assert.deepEqual(dueForReversal(undefined, AHORA), []);
+});
+
+// ---------------------------------------------------------------------------
+// Resolución de RULE_ID tras la ejecución (WF-08)
+// ---------------------------------------------------------------------------
+
+test('resolveRuleId sustituye el placeholder cuando la API devuelve el id', () => {
+  const accion = blockIp('1.2.3.4', 'cloudflare', { accountId: 'acc1', alertId: 'x', expiresAt: 'y' });
+  const resuelta = resolveRuleId(accion, 'rule-abc123');
+  assert.equal(resuelta.undo_payload.path, '/accounts/acc1/firewall/access_rules/rules/rule-abc123');
+  assert.deepEqual(resuelta.undo_payload.requires, []);
+});
+
+test('resolveRuleId no toca la acción si la API no devolvió id (petición fallida)', () => {
+  const accion = blockIp('1.2.3.4', 'cloudflare', { accountId: 'acc1', alertId: 'x', expiresAt: 'y' });
+  const resuelta = resolveRuleId(accion, null);
+  assert.equal(resuelta, accion);
+  assert.match(resuelta.undo_payload.path, /\{\{RULE_ID\}\}/);
+});
+
+test('resolveRuleId no toca acciones sin requires (isolate_host, revoke_session)', () => {
+  const accion = isolateHost('host-abc', { alertId: 'x' });
+  const resuelta = resolveRuleId(accion, 'rule-abc123');
+  assert.equal(resuelta, accion);
 });

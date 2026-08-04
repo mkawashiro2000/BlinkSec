@@ -201,16 +201,12 @@ positivos auto-contenidos**.
 5. **Validar el nodo Redis de WF-00.** La idempotencia necesita semántica
    SETNX; según la versión del nodo puede requerir el patrón alternativo de
    `docs/runbook-idempotencia.md`.
-6. **Implementar la sustitución del `RULE_ID` de Cloudflare** antes de
-   ejercitar la contención real: `lib/containment.js` declara que el
-   `undo_payload` de un bloqueo en Cloudflare necesita el id de la regla
-   creada, pero ningún nodo del workflow lo rellena todavía en
-   `containment_log` — sin esto, WF-07 nunca podrá revertir un bloqueo real
-   (ver R-19). Luego, **repetir el ensayo de contención contra la
-   infraestructura real** (no el mock): bloquear una IP de prueba en
-   Cloudflare real, verificar el registro, verificar la reversión. El
-   flujo en sí ya está verificado contra un mock fiel (R-13); lo que falta
-   es la integración con la API real.
+6. **Repetir el ensayo de contención contra la infraestructura real** (no
+   el mock): bloquear una IP de prueba en Cloudflare real, verificar el
+   registro, verificar la reversión. El flujo en sí ya está verificado
+   contra un mock fiel (R-13), incluida la sustitución del `RULE_ID` que
+   Cloudflare asigna a cada regla (ver R-19); lo que falta es la
+   integración con la API real.
 7. **Conectar una plataforma de ticketing externa**, si se necesita una:
    TheHive se retiró del sistema (R-19) y WF-06 hoy sólo registra en
    Postgres y notifica por Slack.
