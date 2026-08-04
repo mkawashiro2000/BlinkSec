@@ -10,7 +10,13 @@ docker/.env.*
 *.p12
 *.pfx
 **/credentials*.json
+**/creds*.json
+**/*credential*.json
 *.secrets.json
+*secret*.json
+# El runbook de despliegue indica crear ficheros tipo creds.json con las claves
+# en claro para `n8n import:credentials`. Se cubren aquí varias formas de
+# nombrarlos: un despiste al nombrarlo no debe acabar en un push.
 
 # Override de puertos/entorno sólo para pruebas locales (ver Fase 7: puertos
 # 80/443 ocupados por otros servicios del host). Nunca representa producción.
