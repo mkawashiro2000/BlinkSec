@@ -118,7 +118,7 @@
     },
     {
       "parameters": {
-        "url": "=https://cti.crowdsec.net/v2/smoke/{{ $json.ip }}",
+        "url": "=https://cti.api.crowdsec.net/v2/smoke/{{ $json.ip }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {

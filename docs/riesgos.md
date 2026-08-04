@@ -7,7 +7,7 @@ riesgo sin escribir es una sorpresa esperando fecha.
 ## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (ABIERTO — pendiente de aplicar al despliegue en vivo)
 
 Tras retirar GreyNoise e IBM X-Force (R-14, R-17), se incorporó **CrowdSec
-CTI** (`https://cti.crowdsec.net/v2/smoke/{ip}`) como tercera fuente de
+CTI** (`https://cti.api.crowdsec.net/v2/smoke/{ip}`) como tercera fuente de
 inteligencia para IPs, junto a AbuseIPDB y VirusTotal. Se eligió por tener
 un nivel gratuito con una clave fácil de obtener desde `app.crowdsec.net`
 (a diferencia de GreyNoise Community, cuya clave nunca se localizó en la
@@ -44,13 +44,45 @@ lo que sea— se ignora sin más, sin degradar el resto del enriquecimiento.
 Cubierto por el test `aggregate: CrowdSec es best-effort — su fallo NO
 marca el enriquecimiento como parcial` en `tests/triage/enrich.test.js`.
 
-**Pendiente**: aplicar el cambio al despliegue en vivo — crear la
-credencial `blinksec-crowdsec` (Header Auth, `x-api-key`) en n8n,
-reimportar `workflows/dist/WF-02-enriquecimiento.json`, y verificar en
-ejecución real (comprobando el `statusCode` del nodo, nunca la clave)
-siguiendo el mismo patrón que se usó para AbuseIPDB y VirusTotal (ver
-R-17). Con sólo 120 consultas/mes, conviene reservar la verificación en
-vivo a una única alerta de prueba, no a una ráfaga de carga.
+**Bug real encontrado al verificar en vivo: hostname equivocado.** El nodo
+"CrowdSec CTI" apuntaba a `cti.crowdsec.net`, un dominio que **no existe**
+(NXDOMAIN, confirmado tanto desde dentro del contenedor `n8n-main` como
+desde el propio host — no es un problema de DNS de Docker como R-15, el
+dominio simplemente no resuelve para nadie). El hostname real de la API es
+**`cti.api.crowdsec.net`** — confirmado con `curl` directo, que devuelve
+`403 {"message":"Forbidden"}` sin clave, la respuesta esperable de un
+endpoint real que exige autenticación. Corregido en
+`workflows/src/WF-02-enriquecimiento.json` antes de que esto se notara en
+el corpus de tests (que nunca ejercita el hostname real, sólo el parseo de
+la respuesta) — sólo apareció al enviar una alerta real contra n8n y leer
+el error del nodo (`getaddrinfo ENOTFOUND cti.crowdsec.net`) directamente
+de `execution_data`. Recordatorio de por qué la verificación en ejecución
+real importa más que "los tests pasan".
+
+**Aplicado al despliegue en vivo, pero con la clave sin verificar aún
+(ABIERTO).** `workflows/dist/WF-02-enriquecimiento.json` con el hostname
+corregido ya se reimportó en la instancia real (`n8n import:workflow`), y
+la credencial `blinksec-crowdsec` se creó desde la UI de n8n (mismo patrón
+de id interno generado por n8n que R-17 con X-Force — parcheada en
+caliente en `workflow_entity` para apuntar al id real; se perderá en la
+próxima reimportación si no se recrea por CLI con el id literal). El
+nombre de la cabecera se confirmó correcto (`x-api-key`).
+
+Con eso reimportado, una alerta de prueba real (`8.8.8.8`) muestra que la
+petición ya llega al hostname correcto pero **CrowdSec responde `403
+{"message":"Forbidden"}`** — la clave o el estado de la cuenta, no algo de
+n8n ni de BlinkSec. AbuseIPDB y VirusTotal siguen en `200` sin problema, y
+—esto es lo que importa— el 403 de CrowdSec **no** activó
+`partial_enrichment` (`_meta.providersOk: 2, failed: [], partial: false`
+en la ejecución real): el diseño best-effort de más arriba funciona
+exactamente como se pretendía, en producción, no sólo en el test.
+
+**Siguiente paso, pendiente**: aislar el 403 con un `curl -i -H
+"x-api-key: <clave>" https://cti.api.crowdsec.net/v2/smoke/8.8.8.8`
+ejecutado directamente por el operador desde su máquina, fuera de n8n —
+mismo patrón que aisló el 401 de X-Force como problema de cuenta de IBM
+(R-17). Con sólo 120 consultas/mes, reservar cualquier prueba adicional a
+una única llamada, no a una ráfaga.
 
 **Consecuencia real de tener tres fuentes de IP en vez de dos**: mejora el
 margen de corroboración para IPs *cuando CrowdSec tiene cuota disponible*,
