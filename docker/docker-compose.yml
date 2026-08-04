@@ -76,6 +76,9 @@ x-n8n-common: &n8n-common
     BLINKSEC_HMAC_SECRET_SPLUNK: ${BLINKSEC_HMAC_SECRET_SPLUNK}
     BLINKSEC_HMAC_SECRET_ELASTIC: ${BLINKSEC_HMAC_SECRET_ELASTIC}
     BLINKSEC_REPLAY_WINDOW_SECONDS: ${BLINKSEC_REPLAY_WINDOW_SECONDS:-300}
+    # No es secreto (es un identificador, no una clave), pero vive en .env
+    # igual que el resto de config del dominio para no dispersar valores.
+    CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
     BLINKSEC_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
     GENERIC_TIMEZONE: ${TZ:-UTC}
     TZ: ${TZ:-UTC}

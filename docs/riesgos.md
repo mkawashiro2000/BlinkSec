@@ -4,6 +4,32 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
+## R-20 · Cloudflare conectado y verificado; WF-07 quedaba inactivo tras reimportar (CERRADO)
+
+Al aplicar en vivo el trabajo de R-19/R-20 (retirar Wazuh/TheHive,
+Cloudflare como plataforma de contención, fix del RULE_ID): se creó la
+credencial `blinksec-cloudflare` (Header Auth, `Authorization: Bearer
+<token>`) por CLI con el id literal desde el principio — sin el bug de
+`__n8n_BLANK_VALUE_` de la UI, porque nunca se pasó por el formulario. Se
+añadió `CLOUDFLARE_ACCOUNT_ID` como variable de entorno (no es secreto,
+vive en `.env` igual que el resto de config de dominio) y se referencia
+como `$env.CLOUDFLARE_ACCOUNT_ID` en el nodo "Planificar contención" de
+WF-04. **Verificado con una alerta real de Splunk**: AbuseIPDB, VirusTotal
+y CrowdSec responden `200` en la misma ejecución, `partial_enrichment:
+false`, veredicto correcto.
+
+**Hallazgo real al reimportar los 10 workflows**: WF-07 (reversión
+programada) quedó **inactivo** después de la reimportación, igual que
+todos los subflujos — pero, a diferencia de ellos, WF-07 no es un subflujo
+invocado por otro: tiene su propio `scheduleTrigger` (cada 15 minutos) y
+si no se activa **nunca revierte ninguna contención**, sin ningún error
+visible — las reglas de Cloudflare simplemente se acumularían sin caducar
+nunca. El runbook sólo documentaba activar WF-00 (el gateway); no
+mencionaba que WF-07 necesita el mismo tratamiento. Corregido: activado en
+el despliegue en vivo y añadido al runbook de despliegue como paso
+explícito, con la verificación en SQL de que ambos (`blinksecwf00gtwy`,
+`blinksecwf07revr`) quedan `active = true`.
+
 ## R-19 · Wazuh y TheHive retirados del sistema (CERRADO — decisión explícita, no sólo pendiente)
 
 Historial: primero se evaluó conectar Wazuh real. Se descartó Wazuh Cloud

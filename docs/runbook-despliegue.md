@@ -152,16 +152,28 @@ ejecutarla dos veces actualiza, no duplica.
 > activo atendiendo tráfico después de desplegar un arreglo de seguridad, y sin
 > ningún error visible. `npm run build` lo bloquea si falta el id.
 
-Activar el gateway (los subflujos no se activan: los invoca WF-00):
+Activar los dos workflows con disparador propio. **No es sólo el gateway**:
+WF-07 (reversión programada) también tiene su propio trigger —
+`scheduleTrigger`, cada 15 minutos— y si no se activa nunca revierte nada,
+sin ningún error visible (las contenciones simplemente se acumulan sin
+caducar). El resto de subflujos NO se activan: los invoca WF-00/WF-02/…
+directamente.
 
 ```bash
 docker compose -f docker/docker-compose.yml exec n8n-main n8n update:workflow --id=blinksecwf00gtwy --active=true
+docker compose -f docker/docker-compose.yml exec n8n-main n8n update:workflow --id=blinksecwf07revr --active=true
 ```
 
 La activación sólo surte efecto al reiniciar:
 
 ```bash
 docker compose -f docker/docker-compose.yml restart n8n-main n8n-webhook
+```
+
+Verificar que ambos quedaron activos:
+
+```sql
+SELECT id, active FROM workflow_entity WHERE id IN ('blinksecwf00gtwy', 'blinksecwf07revr');
 ```
 
 ## 4. Datos de dominio
