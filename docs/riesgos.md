@@ -149,10 +149,12 @@ para C-1.
 **Menores corregidos**: `resolveRuleId` valida ahora la forma del id de regla
 (un valor con `/` o `?` habría desviado la petición de reversión a otra ruta de
 la API); `__pycache__` estaba versionado y no cubierto por `.gitignore`; se
-añadió `package-lock.json` (`npm audit`: 0 vulnerabilidades); el esquema tiene
-`CHECK` sobre `platform` (una errata dejaría una regla de firewall activa para
-siempre sin que nada lo señalara); los contenedores llevan
-`no-new-privileges` y `cap_drop: ALL` donde es viable.
+verificó con `npm audit` (0 vulnerabilidades — el proyecto no tiene
+dependencias de runtime, así que no se conservó `package-lock.json`: bloquear
+versiones de nada no aporta nada); el esquema tiene `CHECK` sobre `platform`
+(una errata dejaría una regla de firewall activa para siempre sin que nada lo
+señalara); los contenedores llevan `no-new-privileges` y `cap_drop: ALL`
+donde es viable.
 
 **Meta-hallazgo, sin cerrar**: 158 tests en verde mientras tres de estos fallos
 estaban vivos. **Ningún test ejercita el cableado de los workflows**, sólo los
