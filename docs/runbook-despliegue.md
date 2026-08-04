@@ -235,16 +235,22 @@ sistema interpreta como "IoC desconocido" en lugar de como error, y el SOAR
 quedaría ciego pareciendo sano (ver R-09 en `riesgos.md`).
 
 La comprobación concreta: enviar una alerta con `8.8.8.8` como `srcip` y
-confirmar en la ejecución de WF-02 que AbuseIPDB, VirusTotal y CrowdSec CTI
-responden los tres con `200` (revisar `_meta.failed` en el `enrichment` de
-la ejecución).
+confirmar en la ejecución de WF-02 que AbuseIPDB y VirusTotal responden con
+`200` (revisar `_meta.failed` en el `enrichment` de la ejecución).
 
 ```sql
 SELECT verdict, score, partial_enrichment FROM blinksec.alerts ORDER BY received_at DESC LIMIT 5;
 ```
 
-Con las tres credenciales correctas, `partial_enrichment` debe ser `false`.
+Con esas dos credenciales correctas, `partial_enrichment` debe ser `false`.
 
+> **CrowdSec CTI es una tercera fuente best-effort, no core** (ver R-18 en
+> `riesgos.md`): el plan gratuito son sólo 120 consultas/mes, así que su
+> nodo puede devolver `429` con normalidad sin que `partial_enrichment` se
+> active — sólo AbuseIPDB y VirusTotal cuentan para ese techo. Verificar su
+> credencial por separado con **una única** alerta de prueba, no con
+> `load-test.js`: agotaría la cuota mensual entera en segundos.
+>
 > GreyNoise e IBM X-Force se retiraron del sistema — nunca hubo credenciales
 > operativas para ninguno de los dos. Ver R-14 y R-17 en `riesgos.md`.
 

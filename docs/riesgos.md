@@ -4,7 +4,7 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
-## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (ABIERTO — pendiente de credencial real)
+## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (ABIERTO — pendiente de aplicar al despliegue en vivo)
 
 Tras retirar GreyNoise e IBM X-Force (R-14, R-17), se incorporó **CrowdSec
 CTI** (`https://cti.crowdsec.net/v2/smoke/{ip}`) como tercera fuente de
@@ -23,21 +23,42 @@ cualquier clasificación presente se trata como `malicious`; `threat >= 1` o
 (-8) — pesos deliberadamente más bajos que los de VirusTotal/AbuseIPDB
 porque CrowdSec es una fuente de corroboración adicional, no la primaria.
 
-**Sigue sin resolver, igual que R-17 en su momento**: no hay todavía una
-clave de API de CrowdSec CTI operativa conectada en n8n (`blinksec-crowdsec`
-en el runbook de despliegue). El código, el workflow (`WF-02`, nodo
-"CrowdSec CTI") y el corpus de tests (`tests/triage/cases.json`) están
-completos y probados con respuestas simuladas — falta el mismo paso de
-siempre: crear la credencial real y verificar en ejecución contra n8n
-enviando una alerta firmada, comprobando el `statusCode` del nodo (nunca la
-clave en sí), siguiendo el mismo patrón que se usó para verificar AbuseIPDB
-y VirusTotal (ver R-17).
+**Descubierto al conectar la clave real: el plan gratuito son sólo 120
+consultas al mes (~4/día).** Con el volumen medido del sistema (110–140
+alertas/min, ver README) esa cuota se agota en minutos ante cualquier
+ráfaga real. Si CrowdSec se tratara como fuente "core" igual que AbuseIPDB
+o VirusTotal, un `429` suyo habría activado el techo de enriquecimiento
+parcial (`scoring/weights.json` → `caps.partial_enrichment`, 69) para
+**todas** las alertas del resto del día — el proveedor más débil y de
+menor cuota habría podido bloquear la contención automática de todo el
+sistema, aunque las otras dos fuentes respondieran con normalidad.
+
+**Corregido antes de que llegara a producción.** `lib/enrich.js` distingue
+ahora `PROVIDERS` (los tres, se parsean e informan al ticket) de
+`CORE_PROVIDERS` (`abuseipdb`, `virustotal` — los únicos que cuentan para
+`_meta.partial`, `_meta.providersOk` y el techo `single_provider`).
+CrowdSec queda como fuente **best-effort**: cuando responde dentro de
+cuota, su veredicto sigue sumando en `scoring/score.js` como corroboración
+extra (positiva o negativa); cuando no responde —cuota agotada, caída,
+lo que sea— se ignora sin más, sin degradar el resto del enriquecimiento.
+Cubierto por el test `aggregate: CrowdSec es best-effort — su fallo NO
+marca el enriquecimiento como parcial` en `tests/triage/enrich.test.js`.
+
+**Pendiente**: aplicar el cambio al despliegue en vivo — crear la
+credencial `blinksec-crowdsec` (Header Auth, `x-api-key`) en n8n,
+reimportar `workflows/dist/WF-02-enriquecimiento.json`, y verificar en
+ejecución real (comprobando el `statusCode` del nodo, nunca la clave)
+siguiendo el mismo patrón que se usó para AbuseIPDB y VirusTotal (ver
+R-17). Con sólo 120 consultas/mes, conviene reservar la verificación en
+vivo a una única alerta de prueba, no a una ráfaga de carga.
 
 **Consecuencia real de tener tres fuentes de IP en vez de dos**: mejora el
-margen de corroboración para IPs (más difícil que una IP maliciosa parezca
-de fuente única), pero **no cambia nada para hashes** — CrowdSec CTI, igual
-que AbuseIPDB, no resuelve hashes. El techo `single_provider` para alertas
-sólo-por-hash (ver R-17) sigue aplicando exactamente igual.
+margen de corroboración para IPs *cuando CrowdSec tiene cuota disponible*,
+pero no es una garantía — con 4 consultas/día es, en la práctica, una
+señal ocasional, no sistemática. Tampoco cambia nada para hashes —
+CrowdSec CTI, igual que AbuseIPDB, no resuelve hashes. El techo
+`single_provider` para alertas sólo-por-hash (ver R-17) sigue aplicando
+exactamente igual.
 
 ## R-01 · Elastic no firma sus peticiones (ACEPTADO con compensación)
 

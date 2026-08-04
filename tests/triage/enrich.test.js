@@ -154,6 +154,26 @@ test('aggregate: marca parcial si algún proveedor consultado falló', () => {
   assert.equal(e._meta.providersOk, 1);
 });
 
+test('aggregate: CrowdSec es best-effort — su fallo NO marca el enriquecimiento como parcial', () => {
+  // El plan gratuito de CrowdSec CTI son 120 consultas/mes (~4/día). En
+  // cualquier ráfaga real de alertas la cuota se agota en minutos. Si
+  // CrowdSec contara como fuente core, un 429 suyo activaría el techo de
+  // enriquecimiento parcial para TODAS las alertas del resto del día, con
+  // AbuseIPDB y VirusTotal respondiendo perfectamente. No debe pasar.
+  const e = aggregate([
+    { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 0 } } },
+    { provider: 'virustotal', statusCode: 200, body: { data: { attributes: { last_analysis_stats: { malicious: 0, suspicious: 0, harmless: 10, undetected: 5 } } } } },
+    { provider: 'crowdsec', statusCode: 429, body: null },
+  ]);
+  assert.equal(e._meta.partial, false);
+  assert.deepEqual(e._meta.failed, []);
+  assert.equal(e._meta.providersOk, 2);
+  // El dato de CrowdSec sigue disponible para el ticket y el rationale de
+  // scoring, sólo no cuenta para los techos de seguridad.
+  assert.equal(e.crowdsec.available, false);
+  assert.equal(e.crowdsec.error, 'rate_limited');
+});
+
 test('aggregate: no marca parcial si simplemente no se consultó un proveedor', () => {
   // Una alerta sin hashes no consulta VirusTotal por ese IoC. Eso no es una
   // degradación del enriquecimiento y no debe activar el techo de puntuación.
