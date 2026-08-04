@@ -51,7 +51,7 @@ Verificado de extremo a extremo contra el despliegue:
   R-12 en `docs/riesgos.md`. Ahora hay un chequeo dedicado
   (`npm run check:caddy-env`) que lo bloquea en CI.
 - **Contención y Human-in-the-Loop probados de extremo a extremo** contra un
-  stack de mocks (Wazuh, TheHive, GreyNoise, AbuseIPDB, VirusTotal, X-Force):
+  stack de mocks (Wazuh, TheHive, AbuseIPDB, VirusTotal, CrowdSec CTI):
   auto-contención sobre activo de baja criticidad, aprobación humana real vía
   el webhook de reanudación de n8n, rechazo explícito, y timeout real (el
   `wait-tracker` de n8n reanuda solo tras 10 s sin respuesta, sin ejecutar
@@ -101,7 +101,7 @@ npm run build
 
 Los ficheros de `workflows/dist/` se importan en n8n. Hay que crear las
 credenciales con los ids que esperan los nodos (`blinksec-pg`,
-`blinksec-redis`, `blinksec-greynoise`, …) y activar los flujos.
+`blinksec-redis`, `blinksec-abuseipdb`, …) y activar los flujos.
 
 Verificar todo antes de tocar nada:
 

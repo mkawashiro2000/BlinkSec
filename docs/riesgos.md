@@ -4,6 +4,41 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
+## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (ABIERTO — pendiente de credencial real)
+
+Tras retirar GreyNoise e IBM X-Force (R-14, R-17), se incorporó **CrowdSec
+CTI** (`https://cti.crowdsec.net/v2/smoke/{ip}`) como tercera fuente de
+inteligencia para IPs, junto a AbuseIPDB y VirusTotal. Se eligió por tener
+un nivel gratuito con una clave fácil de obtener desde `app.crowdsec.net`
+(a diferencia de GreyNoise Community, cuya clave nunca se localizó en la
+UI, y de X-Force, bloqueado por un problema de cuenta de IBM).
+
+**Diseño**: `lib/enrich.js` → `parseCrowdSec()` interpreta la escala 0-5 de
+`scores.overall.threat`/`aggressiveness` y la lista `classifications.classifications`
+(pertenencia a blocklists de la comunidad CrowdSec). Un `threat >= 3` o
+cualquier clasificación presente se trata como `malicious`; `threat >= 1` o
+`aggressiveness >= 1` sin clasificación como `suspicious`; el resto,
+`clean`. `scoring/weights.json` (versión 5) añade `crowdsec_malicious_max`
+(20, escalado por `threat/5`), `crowdsec_suspicious` (+8) y `crowdsec_clean`
+(-8) — pesos deliberadamente más bajos que los de VirusTotal/AbuseIPDB
+porque CrowdSec es una fuente de corroboración adicional, no la primaria.
+
+**Sigue sin resolver, igual que R-17 en su momento**: no hay todavía una
+clave de API de CrowdSec CTI operativa conectada en n8n (`blinksec-crowdsec`
+en el runbook de despliegue). El código, el workflow (`WF-02`, nodo
+"CrowdSec CTI") y el corpus de tests (`tests/triage/cases.json`) están
+completos y probados con respuestas simuladas — falta el mismo paso de
+siempre: crear la credencial real y verificar en ejecución contra n8n
+enviando una alerta firmada, comprobando el `statusCode` del nodo (nunca la
+clave en sí), siguiendo el mismo patrón que se usó para verificar AbuseIPDB
+y VirusTotal (ver R-17).
+
+**Consecuencia real de tener tres fuentes de IP en vez de dos**: mejora el
+margen de corroboración para IPs (más difícil que una IP maliciosa parezca
+de fuente única), pero **no cambia nada para hashes** — CrowdSec CTI, igual
+que AbuseIPDB, no resuelve hashes. El techo `single_provider` para alertas
+sólo-por-hash (ver R-17) sigue aplicando exactamente igual.
+
 ## R-01 · Elastic no firma sus peticiones (ACEPTADO con compensación)
 
 **Qué pasa.** El conector Webhook de Kibana rellena plantillas, no ejecuta
@@ -208,7 +243,7 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
-## R-17 · Estado real de las credenciales de inteligencia conectadas (ABIERTO)
+## R-17 · Estado real de las credenciales de inteligencia conectadas (CERRADO — GreyNoise y X-Force retirados del sistema)
 
 Verificado en ejecución real contra n8n, enviando una alerta firmada con
 `1.1.1.1` como IP y comprobando el código de respuesta HTTP de cada
@@ -219,31 +254,43 @@ nodo):
 |---|---|---|
 | **AbuseIPDB** | ✅ Funciona | `200`, respuesta real y coherente para 1.1.1.1 (Cloudflare, `isWhitelisted: true`) |
 | **VirusTotal** | ✅ Funciona | `200`, respuesta real y coherente (`attributes.reputation`, análisis de motores) |
-| **GreyNoise** | ❌ `401 unauthorized` | La credencial en n8n nunca se actualizó con una clave real — sigue con el valor de prueba de la Fase 7. Ver R-14. |
-| **IBM X-Force** | ❌ `401 Not authorized` | Confirmado que **no es un problema de n8n ni de BlinkSec**: el mismo 401 se reproduce con `curl -u '<key>:<password>'` directo contra `api.xforce.ibmcloud.com`, ejecutado por el propio operador desde su máquina, fuera de este sistema por completo. El problema está en la cuenta/clave de IBM X-Force Exchange — necesita resolverse directamente con IBM (activación de cuenta, regeneración de clave, o nivel de acceso insuficiente). |
+| ~~GreyNoise~~ | Retirado | Nunca se localizó una clave de API operativa en la cuenta Community de GreyNoise pese a varios intentos guiados. Ver R-14. |
+| ~~IBM X-Force~~ | Retirado | `401 Not authorized`, confirmado **no ser un problema de n8n ni de BlinkSec**: el mismo 401 se reproduce con `curl -u '<key>:<password>'` directo contra `api.xforce.ibmcloud.com`, ejecutado por el propio operador desde su máquina, fuera de este sistema por completo. El problema está en la cuenta/clave de IBM X-Force Exchange, no resoluble desde aquí. |
 
-**Nota operativa sobre X-Force, para cuando se resuelva del lado de IBM.**
-Al depurar el 401, se descubrió y corrigió un problema real de proceso: la
-credencial de X-Force se recreó **desde la UI de n8n** (por un bug de la
-propia UI con `__n8n_BLANK_VALUE_...` al editar el campo de contraseña de
-una credencial existente — no guardaba el valor nuevo). Una credencial
-creada desde la UI recibe un **id interno generado por n8n** (ej.
-`S67d2KI8vkYoJrUH`), distinto del id literal `blinksec-xforce` que el nodo
-del workflow espera y que sí usan las credenciales importadas por CLI
-(`n8n import:credentials`, ver runbook de despliegue). Se parcheó la
-referencia del nodo en caliente para apuntar al id real.
+**Decisión operativa: se retiraron GreyNoise e IBM X-Force del sistema por
+completo**, en vez de dejarlos "pendientes" indefinidamente. Ninguno de los
+dos llegó a tener nunca una credencial operativa real. Se eliminó su código
+de `lib/enrich.js`, `scoring/score.js` y `scoring/weights.json`, sus nodos
+HTTP de `workflows/src/WF-02-enriquecimiento.json`, sus mocks de
+`tools/mock-services.js`, y su cobertura de tests. El motor de triaje quedó
+recalibrado sólo sobre AbuseIPDB y VirusTotal (`scoring/weights.json`
+versión 4).
 
-**Esto se perderá en la próxima reimportación de workflows** (`n8n
-import:workflow --input=/workflows/dist`), porque el parche vive sólo en la
-base de datos de esta instancia, no en el repo — `workflows/src/WF-02-...`
-sigue declarando `"id": "blinksec-xforce"`, que es lo correcto para un
-despliegue limpio. Cuando la cuenta de IBM esté resuelta: **la forma
-robusta de fijarlo de manera duradera es borrar la credencial creada por
-UI y volver a importarla por CLI** con el id literal `blinksec-xforce`
-(mismo patrón que `blinksec-slack`, `blinksec-pg`, etc. en el runbook), no
-volver a parchear el workflow a mano cada vez.
+**Consecuencia real del recorte, no cosmética**: con AbuseIPDB e IBM X-Force
+fuera, VirusTotal queda como el único proveedor capaz de resolver un
+**hash** (AbuseIPDB sólo resuelve IPs). Toda alerta enriquecible sólo por
+hash es, por tanto, siempre de fuente única, y el techo `single_provider`
+(69) le impide alcanzar `critical` en solitario — antes X-Force podía
+corroborar un hash malicioso junto a VirusTotal y sí alcanzar `critical`.
+El corpus de `tests/triage/cases.json` (casos AM-02 y AM-06) se recalculó
+para reflejar este comportamiento real: pasaron de `critical` a
+`investigate`. Es un compromiso deliberado — malware detectado sólo por
+hash, sin corroboración de una segunda fuente, ahora siempre pasa por un
+analista en vez de auto-contenerse.
 
-Con dos de cuatro proveedores de inteligencia operativos, el sistema
+**Nota histórica sobre la credencial de X-Force creada por la UI**, ya sin
+efecto tras retirar el proveedor: al depurar el 401 se descubrió y corrigió
+un problema real de proceso — la credencial se había recreado **desde la UI
+de n8n** por un bug de la propia UI (`__n8n_BLANK_VALUE_...` al editar el
+campo de contraseña de una credencial existente, que no guardaba el valor
+nuevo). Una credencial creada desde la UI recibe un **id interno generado
+por n8n**, distinto del id literal que el nodo del workflow espera y que sí
+usan las credenciales importadas por CLI. El nodo y la credencial en
+cuestión ya no existen en el sistema, así que esto queda documentado sólo
+como antecedente para el próximo bug de UI similar que aparezca con otro
+proveedor.
+
+Con las dos credenciales de inteligencia que quedan operativas, el sistema
 funciona con normalidad — el techo de enriquecimiento parcial de
 `scoring/weights.json` sigue haciendo su trabajo: ningún veredicto puede
 alcanzar `critical` sin, como mínimo, corroboración de fuentes.
@@ -328,9 +375,22 @@ demonio Docker (`/etc/docker/daemon.json` → `"dns": [...]`) en vez de
 repetir `dns:` en cada `docker-compose.yml` del host — decisión del
 operador, no tomada aquí.
 
-## R-14 · GreyNoise Community en vez de tier de pago (ACEPTADO, con adaptación de código)
+## R-14 · GreyNoise Community en vez de tier de pago (CERRADO — GreyNoise retirado del sistema, ver R-17)
 
-La cuenta real conectada es GreyNoise **Community** (nivel gratuito), no el
+**Superado por R-17: GreyNoise se retiró del sistema por completo.** Nunca
+se logró localizar una clave de API operativa en la cuenta GreyNoise pese a
+varios intentos guiados (la cuenta Community, a diferencia del tier de
+pago, no expone la clave en el lugar habitual de la UI). En vez de seguir
+troubleshooteando indefinidamente, se decidió eliminar GreyNoise del
+sistema — código, workflow, tests y documentación — junto con IBM X-Force
+(R-17). Lo que sigue es el análisis histórico de cuando GreyNoise sí estuvo
+conectado (con la clave de prueba de la Fase 7), conservado como contexto
+de por qué la adaptación Community-vs-pago ya no aplica: el parser
+`parseGreyNoise()` que describe fue eliminado de `lib/enrich.js`.
+
+---
+
+La cuenta real conectada era GreyNoise **Community** (nivel gratuito), no el
 tier de pago que asumía el diseño original. Dos endpoints distintos, dos
 formas de respuesta completamente distintas del mismo proveedor:
 

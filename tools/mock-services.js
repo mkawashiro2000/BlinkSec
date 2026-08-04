@@ -4,17 +4,20 @@
  * BlinkSec — mocks de proveedores externos para el ensayo de contención de
  * la Fase 7 (WF-04, WF-05, WF-07).
  *
- * Sustituye a GreyNoise, AbuseIPDB, VirusTotal, IBM X-Force, Wazuh y TheHive
- * mientras no hay credenciales ni infraestructura real disponibles. Escucha
- * en HTTP plano (sin TLS) y enruta por ruta, no por Host, así que un único
- * proceso basta para todos los proveedores dentro de la red docker interna.
+ * Sustituye a AbuseIPDB, VirusTotal, Wazuh y TheHive mientras no hay
+ * credenciales ni infraestructura real disponibles. Escucha en HTTP plano
+ * (sin TLS) y enruta por ruta, no por Host, así que un único proceso basta
+ * para todos los proveedores dentro de la red docker interna.
+ *
+ * GreyNoise e IBM X-Force se retiraron del sistema (ver docs/riesgos.md) y
+ * ya no tienen mock aquí.
  *
  * NO ES CÓDIGO DE PRODUCCIÓN. Vive fuera de lib/ y workflows/ a propósito:
  * nunca se inyecta en un workflow ni se importa desde otro módulo del repo.
  *
  * Comportamiento configurable por variable de entorno, para poder ensayar
  * tanto el camino de contención como el de descarte con el mismo binario:
- *   MOCK_VERDICT=malicious   (default) intel maliciosa en las 4 fuentes
+ *   MOCK_VERDICT=malicious   (default) intel maliciosa en ambas fuentes
  *   MOCK_VERDICT=benign      intel limpia — para confirmar que no contiene
  */
 
@@ -47,21 +50,6 @@ function leerCuerpo(req) {
 // Respuestas de inteligencia — forma real de cada API, no un atajo simplificado
 // ---------------------------------------------------------------------------
 
-function greynoise() {
-  if (VEREDICTO === 'benign') {
-    return { business_service_intelligence: { found: false }, internet_scanner_intelligence: { found: false } };
-  }
-  return {
-    internet_scanner_intelligence: {
-      found: true,
-      classification: 'malicious',
-      actor: 'mock-botnet',
-      last_seen: new Date().toISOString().slice(0, 10),
-      cves: ['CVE-2024-9999'],
-    },
-  };
-}
-
 function abuseipdb() {
   const conf = VEREDICTO === 'benign' ? 0 : 97;
   return {
@@ -90,9 +78,14 @@ function virustotal(esHash) {
   };
 }
 
-function xforce() {
-  if (VEREDICTO === 'benign') return { score: 0, cats: {} };
-  return { score: 9, cats: { Malware: 95, 'Botnet Command and Control Server': 80 } };
+function crowdsec() {
+  if (VEREDICTO === 'benign') {
+    return { scores: { overall: { threat: 0, aggressiveness: 0 } }, classifications: { classifications: [] } };
+  }
+  return {
+    scores: { overall: { threat: 4, aggressiveness: 3 } },
+    classifications: { classifications: [{ label: 'CrowdSec Community Blocklist' }] },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -106,11 +99,10 @@ const servidor = http.createServer(async (req, res) => {
   const entrada = { metodo: req.method, ruta: url.pathname, hora: new Date().toISOString() };
 
   // --- Inteligencia de amenazas -------------------------------------------
-  if (url.pathname.startsWith('/v3/ip/')) return json(res, 200, greynoise());
   if (url.pathname === '/api/v2/check') return json(res, 200, abuseipdb());
   if (url.pathname.startsWith('/api/v3/files/')) return json(res, 200, virustotal(true));
   if (url.pathname.startsWith('/api/v3/ip_addresses/')) return json(res, 200, virustotal(false));
-  if (url.pathname.startsWith('/malware/') || url.pathname.startsWith('/ipr/')) return json(res, 200, xforce());
+  if (url.pathname.startsWith('/v2/smoke/')) return json(res, 200, crowdsec());
 
   // --- Wazuh: ejecución y reversión de respuesta activa -------------------
   if (url.pathname === '/active-response' && req.method === 'PUT') {

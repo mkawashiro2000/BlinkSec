@@ -6,127 +6,23 @@
  * 503, o un esquema que cambió sin avisar. En producción eso no es el caso
  * excepcional — con el free tier de VirusTotal (4 req/min) es el caso normal
  * durante una ráfaga de alertas.
+ *
+ * Proveedores: AbuseIPDB, VirusTotal y CrowdSec CTI. GreyNoise e IBM X-Force
+ * se retiraron del sistema — ver docs/riesgos.md.
  */
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  parseGreyNoise,
   parseVirusTotal,
   parseAbuseIPDB,
-  parseXForce,
+  parseCrowdSec,
   aggregate,
   cacheKey,
   ttlFor,
   CACHE_TTL,
 } = require('../../lib/enrich.js');
-
-// ---------------------------------------------------------------------------
-// GreyNoise
-// ---------------------------------------------------------------------------
-
-test('greynoise: un servicio comercial se marca benigno', () => {
-  const r = parseGreyNoise({ business_service_intelligence: { found: true, name: 'Google Public DNS', trust_level: '1' } });
-  assert.equal(r.verdict, 'benign');
-  assert.equal(r.data.kind, 'business_service');
-  assert.equal(r.data.name, 'Google Public DNS');
-});
-
-test('greynoise: 404 significa "no observada", no error', () => {
-  // Distinción con consecuencias: tratarlo como error activaría el techo de
-  // enriquecimiento parcial y bloquearía la contención de amenazas reales.
-  const r = parseGreyNoise(null, 404);
-  assert.equal(r.available, true);
-  assert.equal(r.verdict, 'not_observed');
-});
-
-test('greynoise: extrae los metadatos v3 para el ticket', () => {
-  const r = parseGreyNoise({
-    internet_scanner_intelligence: {
-      found: true,
-      classification: 'malicious',
-      actor: 'unknown',
-      tls: { ja4: 't13d1516h2_8daaf6152771_b186095e22b6' },
-      metadata: { carrier: 'Vodafone', rdns_parent: 'example.net' },
-      raw_data: { scan: [{ port: 22 }, { port: 445 }] },
-      cves: ['CVE-2024-3400'],
-    },
-  });
-  assert.equal(r.verdict, 'malicious');
-  assert.equal(r.data.ja4, 't13d1516h2_8daaf6152771_b186095e22b6');
-  assert.equal(r.data.carrier, 'Vodafone');
-  assert.deepEqual(r.data.destinationPorts, [22, 445]);
-  assert.deepEqual(r.data.cves, ['CVE-2024-3400']);
-});
-
-test('greynoise: un 503 se marca no disponible', () => {
-  const r = parseGreyNoise(null, 503);
-  assert.equal(r.available, false);
-  assert.match(r.error, /503/);
-});
-
-// ---------------------------------------------------------------------------
-// GreyNoise — Community API (/v3/community/{ip}, nivel gratuito)
-//
-// Respuesta plana: { ip, noise, riot, classification, name, link, last_seen,
-// message } — nada que ver con la forma anidada del tier de pago. El
-// dispatcher de parseGreyNoise() detecta cuál llegó por la ausencia de
-// internet_scanner_intelligence / business_service_intelligence.
-// ---------------------------------------------------------------------------
-
-test('greynoise community: riot=true es un servicio comercial benigno', () => {
-  // Ejemplo real de la documentación de GreyNoise: 1.2.3.4 -> Cloudflare.
-  const r = parseGreyNoise({
-    ip: '1.2.3.4',
-    noise: false,
-    riot: true,
-    classification: 'benign',
-    name: 'Cloudflare',
-    link: 'https://viz.greynoise.io/riot/1.2.3.4',
-    last_seen: '2020-01-01',
-    message: 'Success',
-  });
-  assert.equal(r.verdict, 'benign');
-  assert.equal(r.data.kind, 'business_service');
-  assert.equal(r.data.name, 'Cloudflare');
-  assert.equal(r.data.limited, true);
-});
-
-test('greynoise community: noise=true con classification malicious', () => {
-  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'malicious' });
-  assert.equal(r.verdict, 'malicious');
-  assert.equal(r.data.kind, 'internet_scanner');
-});
-
-test('greynoise community: noise=true con classification benign', () => {
-  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'benign' });
-  assert.equal(r.verdict, 'benign');
-  assert.equal(r.data.kind, 'internet_scanner');
-});
-
-test('greynoise community: ni riot ni noise es "no observada"', () => {
-  const r = parseGreyNoise({ ip: '9.9.9.9', noise: false, riot: false, classification: 'unknown' });
-  assert.equal(r.verdict, 'not_observed');
-  assert.equal(r.data.limited, true);
-});
-
-test('greynoise community: classification desconocida cae a inconclusive, no revienta', () => {
-  const r = parseGreyNoise({ ip: '5.6.7.8', noise: true, riot: false, classification: 'algo-nuevo-que-anadan' });
-  assert.equal(r.verdict, 'inconclusive');
-});
-
-test('greynoise: la forma de pago y la Community nunca se confunden entre sí', () => {
-  // La detección es por la PRESENCIA de las claves anidadas, no por un flag
-  // de configuración — así, si la cuenta cambia de tier, sólo hace falta
-  // tocar la URL del nodo HTTP, nunca el código de parseo.
-  const pago = parseGreyNoise({ internet_scanner_intelligence: { found: true, classification: 'malicious' } });
-  const community = parseGreyNoise({ noise: true, riot: false, classification: 'malicious' });
-  assert.equal(pago.verdict, 'malicious');
-  assert.equal(community.verdict, 'malicious');
-  assert.equal(pago.data.limited, undefined, 'la forma de pago no debe marcarse como limitada');
-  assert.equal(community.data.limited, true);
-});
 
 // ---------------------------------------------------------------------------
 // VirusTotal
@@ -206,20 +102,42 @@ test('abuseipdb: un cuerpo sin data se marca no disponible', () => {
 });
 
 // ---------------------------------------------------------------------------
-// X-Force
+// CrowdSec CTI
 // ---------------------------------------------------------------------------
 
-test('xforce: mapea la puntuación 1-10 a veredictos', () => {
-  assert.equal(parseXForce({ score: 9 }).verdict, 'malicious');
-  assert.equal(parseXForce({ score: 5 }).verdict, 'suspicious');
-  assert.equal(parseXForce({ score: 1 }).verdict, 'inconclusive');
-  assert.equal(parseXForce({ score: 0 }).verdict, 'clean');
+test('crowdsec: 404 es "nunca reportada", no error ni limpio', () => {
+  const r = parseCrowdSec(null, 404);
+  assert.equal(r.available, true);
+  assert.equal(r.verdict, 'unknown');
+  assert.equal(r.data.known, false);
 });
 
-test('xforce: acepta la respuesta envuelta en result', () => {
-  const r = parseXForce({ result: { score: 8, cats: { Malware: 90 } } });
-  assert.equal(r.verdict, 'malicious');
-  assert.deepEqual(r.data.categories, ['Malware']);
+test('crowdsec: 429 se marca como no disponible por cuota', () => {
+  const r = parseCrowdSec(null, 429);
+  assert.equal(r.available, false);
+  assert.equal(r.error, 'rate_limited');
+});
+
+test('crowdsec: threat alto o presencia en una lista de bloqueo es malicioso', () => {
+  const porThreat = parseCrowdSec({ scores: { overall: { threat: 4, aggressiveness: 2 } }, classifications: { classifications: [] } });
+  assert.equal(porThreat.verdict, 'malicious');
+
+  const porLista = parseCrowdSec({
+    scores: { overall: { threat: 1, aggressiveness: 0 } },
+    classifications: { classifications: [{ label: 'CrowdSec Community Blocklist' }] },
+  });
+  assert.equal(porLista.verdict, 'malicious');
+  assert.deepEqual(porLista.data.classifications, ['CrowdSec Community Blocklist']);
+});
+
+test('crowdsec: actividad agresiva sin lista de bloqueo es sospechoso, no malicioso', () => {
+  const r = parseCrowdSec({ scores: { overall: { threat: 1, aggressiveness: 1 } }, classifications: { classifications: [] } });
+  assert.equal(r.verdict, 'suspicious');
+});
+
+test('crowdsec: sin señal alguna es limpio', () => {
+  const r = parseCrowdSec({ scores: { overall: { threat: 0, aggressiveness: 0 } }, classifications: { classifications: [] } });
+  assert.equal(r.verdict, 'clean');
 });
 
 // ---------------------------------------------------------------------------
@@ -228,7 +146,7 @@ test('xforce: acepta la respuesta envuelta en result', () => {
 
 test('aggregate: marca parcial si algún proveedor consultado falló', () => {
   const e = aggregate([
-    { provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'benign' } } },
+    { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 0 } } },
     { provider: 'virustotal', statusCode: 429, body: null },
   ]);
   assert.equal(e._meta.partial, true);
@@ -237,14 +155,11 @@ test('aggregate: marca parcial si algún proveedor consultado falló', () => {
 });
 
 test('aggregate: no marca parcial si simplemente no se consultó un proveedor', () => {
-  // Una alerta sin hashes no consulta VirusTotal. Eso no es una degradación
-  // del enriquecimiento y no debe activar el techo de puntuación.
-  const e = aggregate([
-    { provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'benign' } } },
-    { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 0 } } },
-  ]);
+  // Una alerta sin hashes no consulta VirusTotal por ese IoC. Eso no es una
+  // degradación del enriquecimiento y no debe activar el techo de puntuación.
+  const e = aggregate([{ provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 0 } } }]);
   assert.equal(e._meta.partial, false);
-  assert.equal(e._meta.providersOk, 2);
+  assert.equal(e._meta.providersOk, 1);
 });
 
 test('aggregate: un cambio de esquema del proveedor no tumba el flujo', () => {
@@ -262,7 +177,17 @@ test('aggregate: ignora proveedores desconocidos', () => {
 test('aggregate: sin respuestas, todos quedan como no consultados', () => {
   const e = aggregate([]);
   assert.equal(e._meta.partial, false);
-  assert.equal(e.greynoise.error, 'no_consultado');
+  assert.equal(e.virustotal.error, 'no_consultado');
+  assert.equal(e.abuseipdb.error, 'no_consultado');
+  assert.equal(e.crowdsec.error, 'no_consultado');
+});
+
+test('aggregate: sólo conoce AbuseIPDB, VirusTotal y CrowdSec', () => {
+  // GreyNoise e IBM X-Force se retiraron del sistema; este test fija esa
+  // propiedad para que no vuelvan a aparecer sin que se note en la matriz de
+  // confusión (ver docs/riesgos.md).
+  const { PROVIDERS } = require('../../lib/enrich.js');
+  assert.deepEqual([...PROVIDERS].sort(), ['abuseipdb', 'crowdsec', 'virustotal']);
 });
 
 // ---------------------------------------------------------------------------

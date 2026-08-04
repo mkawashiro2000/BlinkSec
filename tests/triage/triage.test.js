@@ -103,10 +103,8 @@ test('el enriquecimiento parcial nunca alcanza el umbral crítico', () => {
     validation: { ok: true, enriquecible: true },
   };
   const enrichment = aggregate([
-    { provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'malicious' } } },
     { provider: 'virustotal', statusCode: 200, body: { data: { attributes: { last_analysis_stats: { malicious: 70, suspicious: 0, harmless: 0, undetected: 0 } } } } },
-    { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 100, totalReports: 999 } } },
-    { provider: 'xforce', statusCode: 503, body: null }, // el único caído
+    { provider: 'abuseipdb', statusCode: 503, body: null }, // el único caído
   ]);
   const r = score(alerta, enrichment, {});
   assert.equal(r.verdict, VERDICTS.INVESTIGATE);
@@ -123,8 +121,8 @@ test('la allowlist se evalúa antes del scoring y corta en seco', () => {
   };
   // Aunque toda la inteligencia grite "malicioso", una IP propia no se toca.
   const enrichment = aggregate([
-    { provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'malicious' } } },
     { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 100, totalReports: 999 } } },
+    { provider: 'virustotal', statusCode: 200, body: { data: { attributes: { last_analysis_stats: { malicious: 60, suspicious: 0, harmless: 0, undetected: 10 } } } } },
   ]);
   const r = score(alerta, enrichment, { allowlist: ['10.10.5.0/24'] });
   assert.equal(r.verdict, VERDICTS.FALSE_POSITIVE);
@@ -153,9 +151,8 @@ test('ninguna señal aislada alcanza el umbral crítico', () => {
     validation: { ok: true, enriquecible: true },
   };
   const senalesUnicas = [
-    [{ provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'malicious' } } }],
     [{ provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 100, totalReports: 999 } } }],
-    [{ provider: 'xforce', statusCode: 200, body: { score: 10, cats: { Malware: 100 } } }],
+    [{ provider: 'virustotal', statusCode: 200, body: { data: { attributes: { last_analysis_stats: { malicious: 70, suspicious: 0, harmless: 0, undetected: 0 } } } } }],
   ];
   for (const responses of senalesUnicas) {
     const r = score(alerta, aggregate(responses), {});
@@ -203,9 +200,8 @@ test('never_isolate fuerza aprobación humana aunque el activo sea de baja criti
     validation: { ok: true, enriquecible: true },
   };
   const enrichment = aggregate([
-    { provider: 'greynoise', statusCode: 200, body: { internet_scanner_intelligence: { found: true, classification: 'malicious' } } },
     { provider: 'abuseipdb', statusCode: 200, body: { data: { abuseConfidenceScore: 100, totalReports: 999 } } },
-    { provider: 'xforce', statusCode: 200, body: { score: 9, cats: {} } },
+    { provider: 'virustotal', statusCode: 200, body: { data: { attributes: { last_analysis_stats: { malicious: 60, suspicious: 0, harmless: 0, undetected: 10 } } } } },
   ]);
   const r = score(alerta, enrichment, {});
   assert.equal(r.verdict, VERDICTS.CRITICAL);

@@ -66,37 +66,6 @@ function ipInCidr(ip, cidr) {
 // Señales individuales
 // ---------------------------------------------------------------------------
 
-function scoreGreyNoise(gn, w, rationale) {
-  if (!gn?.available) return 0;
-  const s = w.signals;
-
-  if (gn.verdict === 'benign' && gn.data?.kind === 'business_service') {
-    rationale.push(`GreyNoise: servicio comercial conocido (${gn.data.name ?? 'sin nombre'}) → descarte fuerte`);
-    return s.greynoise_business_service;
-  }
-  if (gn.verdict === 'benign') {
-    rationale.push(`GreyNoise: escáner benigno documentado (${gn.data?.actor ?? 'actor desconocido'})`);
-    return s.greynoise_benign_scanner;
-  }
-  if (gn.verdict === 'malicious') {
-    rationale.push(`GreyNoise: escáner clasificado como malicioso (${gn.data?.actor ?? 'actor desconocido'})`);
-    return s.greynoise_malicious_scanner;
-  }
-  if (gn.verdict === 'suspicious') {
-    rationale.push('GreyNoise: escáner sospechoso');
-    return s.greynoise_suspicious_scanner;
-  }
-  if (gn.verdict === 'not_observed') {
-    // No aparecer en el ruido de fondo de internet es LEVEMENTE agravante: la
-    // IP no escanea indiscriminadamente, luego el contacto contigo es más
-    // probablemente dirigido. Peso pequeño: también es lo normal en IPs
-    // domésticas o de móvil.
-    rationale.push('GreyNoise: IP no observada en el ruido de internet (posible actividad dirigida)');
-    return s.greynoise_not_observed;
-  }
-  return 0;
-}
-
 function scoreVirusTotal(vt, w, rationale) {
   if (!vt?.available) return 0;
   const s = w.signals;
@@ -149,17 +118,31 @@ function scoreAbuseIPDB(ab, w, rationale) {
   return puntos;
 }
 
-function scoreXForce(xf, w, rationale) {
-  if (!xf?.available) return 0;
+function scoreCrowdSec(cs, w, rationale) {
+  if (!cs?.available) return 0;
   const s = w.signals;
-  if (xf.verdict === 'malicious') {
-    rationale.push(`IBM X-Force: riesgo ${xf.data.score}/10 (${xf.data.categories.join(', ') || 'sin categoría'})`);
-    return s.xforce_malicious;
+
+  if (cs.verdict === 'malicious') {
+    // Escalado por el nivel de amenaza (0-5) que reporta la red de sensores
+    // de CrowdSec, no binario: threat=5 con varias listas de bloqueo es una
+    // señal mucho más fuerte que threat=3 con una sola clasificación.
+    const nivel = clamp(cs.data?.threat ?? 0, 0, 5);
+    const puntos = Math.round(s.crowdsec_malicious_max * clamp(nivel / 5, 0.4, 1));
+    rationale.push(
+      `CrowdSec: nivel de amenaza ${nivel}/5` +
+        (cs.data.classifications?.length ? ` (${cs.data.classifications.join(', ')})` : ''),
+    );
+    return puntos;
   }
-  if (xf.verdict === 'suspicious') {
-    rationale.push(`IBM X-Force: riesgo ${xf.data.score}/10`);
-    return s.xforce_suspicious;
+  if (cs.verdict === 'suspicious') {
+    rationale.push(`CrowdSec: actividad agresiva sin llegar a lista de bloqueo (amenaza ${cs.data.threat}/5)`);
+    return s.crowdsec_suspicious;
   }
+  if (cs.verdict === 'clean') {
+    rationale.push('CrowdSec: sin comportamiento agresivo reportado');
+    return s.crowdsec_clean;
+  }
+  if (cs.verdict === 'unknown') rationale.push('CrowdSec: IP nunca reportada a la red (sin veredicto)');
   return 0;
 }
 
@@ -228,10 +211,9 @@ function score(alert, enrichment, options = {}) {
   let bruto = w.base ?? 35;
   rationale.push(`Línea base sin contexto: ${bruto}`);
 
-  bruto += scoreGreyNoise(enrichment?.greynoise, w, rationale);
   bruto += scoreVirusTotal(enrichment?.virustotal, w, rationale);
   bruto += scoreAbuseIPDB(enrichment?.abuseipdb, w, rationale);
-  bruto += scoreXForce(enrichment?.xforce, w, rationale);
+  bruto += scoreCrowdSec(enrichment?.crowdsec, w, rationale);
   bruto += scoreRuleLevel(alert, w, rationale);
   bruto += scoreAsset(alert, w, rationale);
 

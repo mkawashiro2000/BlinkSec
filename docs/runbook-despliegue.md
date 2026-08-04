@@ -125,10 +125,9 @@ esperan los nodos:
 |---|---|---|
 | `blinksec-pg` | Postgres | mismos datos que el `.env` |
 | `blinksec-redis` | Redis | con contraseña |
-| `blinksec-greynoise` | Header Auth | `key: <API key>` |
 | `blinksec-abuseipdb` | Header Auth | `Key: <API key>` + `Accept: application/json` |
 | `blinksec-virustotal` | Header Auth | `x-apikey: <API key>` |
-| `blinksec-xforce` | Basic Auth | usuario = API key, contraseña = API password |
+| `blinksec-crowdsec` | Header Auth | `x-api-key: <API key>` (obtenida en app.crowdsec.net → CTI) |
 | `blinksec-thehive` | Header Auth | `Authorization: Bearer <key>` |
 | `blinksec-wazuh` | Header Auth | `Authorization: Bearer <JWT>` |
 | `blinksec-slack` | Slack API | scopes `chat:write`, `chat:write.public` |
@@ -231,19 +230,23 @@ Todas las respuestas deben ser `200`. Una petición sin firma debe dar `401`, y
 una con `X-BlinkSec-Source` desconocido, `400`.
 
 **Verificar las credenciales de inteligencia una por una.** Una clave mal
-copiada no falla de forma visible: GreyNoise y VirusTotal pueden devolver
-respuestas que el sistema interpreta como "IoC desconocido" en lugar de como
-error, y el SOAR quedaría ciego pareciendo sano (ver R-09 en `riesgos.md`).
+copiada no falla de forma visible: VirusTotal puede devolver respuestas que el
+sistema interpreta como "IoC desconocido" en lugar de como error, y el SOAR
+quedaría ciego pareciendo sano (ver R-09 en `riesgos.md`).
 
 La comprobación concreta: enviar una alerta con `8.8.8.8` como `srcip` y
-confirmar en la ejecución de WF-02 que GreyNoise la clasifica como
-**servicio comercial**. Si sale "no observada", la credencial no está actuando.
+confirmar en la ejecución de WF-02 que AbuseIPDB, VirusTotal y CrowdSec CTI
+responden los tres con `200` (revisar `_meta.failed` en el `enrichment` de
+la ejecución).
 
 ```sql
 SELECT verdict, score, partial_enrichment FROM blinksec.alerts ORDER BY received_at DESC LIMIT 5;
 ```
 
-Con las cuatro credenciales correctas, `partial_enrichment` debe ser `false`.
+Con las tres credenciales correctas, `partial_enrichment` debe ser `false`.
+
+> GreyNoise e IBM X-Force se retiraron del sistema — nunca hubo credenciales
+> operativas para ninguno de los dos. Ver R-14 y R-17 en `riesgos.md`.
 
 ## 7. Ensayo controlado
 

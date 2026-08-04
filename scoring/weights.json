@@ -1,6 +1,6 @@
 {
   "_comment": "Pesos del motor de triaje de BlinkSec. Ajustar aquí, NUNCA en score.js: cada cambio debe re-ejecutar tests/triage/ y revisar la matriz de confusión antes de desplegarse. Un cambio de pesos es un cambio de producción.",
-  "version": 3,
+  "version": 5,
 
   "_comment_base": "Línea base 35 = 'alerta sin contexto: se investiga, no se contiene ni se descarta'. Consecuencia deliberada: ninguna señal aislada llega al umbral crítico (70), así que la contención automática SIEMPRE exige corroboración de al menos dos fuentes.",
   "base": 35,
@@ -10,14 +10,8 @@
     "critical": 70
   },
 
+  "_comment_signals": "GreyNoise e IBM X-Force se retiraron del sistema (ver docs/riesgos.md): sin credenciales operativas para ninguno de los dos, nunca aportaron señal real. CrowdSec CTI los sustituye como tercera fuente para IPs.",
   "signals": {
-    "greynoise_business_service": -45,
-    "greynoise_benign_scanner": -35,
-    "greynoise_suspicious_scanner": 10,
-    "greynoise_malicious_scanner": 30,
-    "_comment_not_observed": "No aparecer en el ruido de internet es LEVEMENTE agravante (el contacto es más probablemente dirigido), pero también es lo normal en IPs domésticas o móviles. Peso pequeño a propósito.",
-    "greynoise_not_observed": 5,
-
     "virustotal_malicious_max": 35,
     "virustotal_suspicious": 12,
     "virustotal_clean": -25,
@@ -26,8 +20,9 @@
     "abuseipdb_clean": -10,
     "abuseipdb_whitelisted": -35,
 
-    "xforce_malicious": 15,
-    "xforce_suspicious": 6,
+    "crowdsec_malicious_max": 20,
+    "crowdsec_suspicious": 8,
+    "crowdsec_clean": -8,
 
     "rule_level_high": 15,
     "rule_level_medium": 7,
