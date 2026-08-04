@@ -26,7 +26,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT id, alert_id, action_type, target, platform, undo_payload, expires_at\nFROM blinksec.containment_log\nWHERE reverted_at IS NULL\n  AND expires_at <= now()\n  AND undo_payload IS NOT NULL\n  AND action_type IN ('block_ip', 'isolate_host')\nORDER BY expires_at ASC\nLIMIT 50;",
+        "query": "SELECT id, alert_id, action_type, target, platform, undo_payload, expires_at\nFROM blinksec.containment_log\nWHERE reverted_at IS NULL\n  AND expires_at <= now()\n  AND undo_payload IS NOT NULL\n  AND action_type IN ('block_ip', 'isolate_host')\n  AND platform = 'cloudflare'\nORDER BY expires_at ASC\nLIMIT 50;",
         "options": {}
       },
       "id": "wf07-query",
@@ -44,7 +44,7 @@
         }
       },
       "alwaysOutputData": true,
-      "notes": "Se excluyen revoke_session y kill_process: no son reversibles por naturaleza. LIMIT 50 evita que un backlog acumulado sature las APIs en una sola pasada."
+      "notes": "Se excluyen revoke_session y kill_process: no son reversibles por naturaleza. LIMIT 50 evita que un backlog acumulado sature las APIs en una sola pasada. | platform='cloudflare' es OBLIGATORIO: este flujo tiene la URL base de Cloudflare fija. Sin el filtro seleccionaba también acciones de CrowdStrike (isolate_host) y enviaba su payload de lift_containment a api.cloudflare.com. Al añadir una plataforma nueva hay que enrutar por platform antes de quitar este filtro — ver docs/riesgos.md."
     },
     {
       "parameters": {
@@ -80,7 +80,7 @@
     },
     {
       "parameters": {
-        "method": "DELETE",
+        "method": "={{ $json.undo_payload.method }}",
         "url": "=https://api.cloudflare.com/client/v4{{ $json.undo_payload.path }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
@@ -115,11 +115,12 @@
       "maxTries": 3,
       "waitBetweenTries": 5000,
       "onError": "continueRegularOutput",
-      "notes": "Cloudflare es la única plataforma de bloqueo de IP soportada tras retirar Wazuh (ver docs/riesgos.md, R-19). Método fijo en DELETE — mismo razonamiento que WF-08."
+      "notes": "El método sale del propio undo_payload, no fijo: cada plataforma revierte con un verbo distinto (Cloudflare DELETE, CrowdStrike POST). Estaba fijo en DELETE, lo que habría mandado un POST de CrowdStrike como DELETE a Cloudflare. La URL base sigue siendo la de Cloudflare, por eso la consulta filtra platform='cloudflare'."
     },
     {
       "parameters": {
-        "jsCode": "// WF-07 · Registro del resultado de la reversión.\n//\n// Una reversión fallida es MÁS grave que una contención fallida: significa\n// que hay una regla de firewall activa que nadie va a quitar y que el sistema\n// cree haber gestionado. Se registra el error explícitamente para que aparezca\n// en el informe de guardia en lugar de desvanecerse.\n\nconst fila = $('Contenciones vencidas').first().json;\nconst respuesta = $input.first().json;\n\nconst ok = (respuesta.statusCode ?? 0) >= 200 && (respuesta.statusCode ?? 0) < 300;\n\nreturn [\n  {\n    json: {\n      id: fila.id,\n      alert_id: fila.alert_id,\n      target: fila.target,\n      action_type: fila.action_type,\n      ok,\n      error: ok ? null : `HTTP ${respuesta.statusCode}: ${JSON.stringify(respuesta.body ?? {}).slice(0, 300)}`,\n    },\n  },\n];"
+        "jsCode": "// WF-07 · Registro del resultado de la reversión.\n//\n// Una reversión fallida es MÁS grave que una contención fallida: significa\n// que hay una regla de firewall activa que nadie va a quitar y que el sistema\n// cree haber gestionado. Se registra el error explícitamente para que aparezca\n// en el informe de guardia en lugar de desvanecerse.\n//\n// mode=runOnceForEachItem + .item, NO .first(): la consulta trae hasta 50\n// contenciones vencidas. Con .first() y un único item de salida, sólo se\n// marcaba como revertida la PRIMERA — las otras 49 seguían activas y el\n// resultado HTTP se atribuía a la fila equivocada. Con 50 pendientes hacían\n// falta 50 ciclos de 15 min para drenarlas.\n\nconst fila = $('Contenciones vencidas').item.json;\nconst respuesta = $input.item.json;\n\nconst ok = (respuesta.statusCode ?? 0) >= 200 && (respuesta.statusCode ?? 0) < 300;\n\nreturn {\n  json: {\n    id: fila.id,\n    alert_id: fila.alert_id,\n    target: fila.target,\n    action_type: fila.action_type,\n    ok,\n    error: ok ? null : `HTTP ${respuesta.statusCode}: ${JSON.stringify(respuesta.body ?? {}).slice(0, 300)}`,\n  },\n};",
+        "mode": "runOnceForEachItem"
       },
       "id": "wf07-result",
       "name": "Evaluar resultado",

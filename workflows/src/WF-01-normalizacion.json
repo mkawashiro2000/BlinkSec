@@ -19,7 +19,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// WF-01 · Normalización al contrato interno de BlinkSec.\n//\n// Punto de desacople del sistema: a partir de aquí nada sabe de qué\n// plataforma vino la alerta. Añadir un cuarto SIEM se resuelve escribiendo un\n// normalizador en lib/normalize.js, sin tocar nada aguas abajo.\n\n// @blinksec-inject: lib/normalize.js\n\nconst entrada = $input.first().json;\n\nlet alertas;\ntry {\n  alertas = normalize(entrada.source, entrada.rawBody);\n} catch (e) {\n  // Un payload irrecuperable no se procesa a medias: se deriva a WF-99 con el\n  // contexto suficiente para que alguien arregle la regla de origen.\n  throw new Error(`Normalización fallida (${entrada.source}): ${e.message}`);\n}\n\n// Elastic puede traer varias alertas en un solo POST. Cada una recibe su\n// propio alert_id derivado, para que la idempotencia funcione por alerta y no\n// por lote: si el lote se reenvía con una alerta nueva, sólo esa se procesa.\nreturn alertas.map((a, i) => ({\n  json: {\n    ...a,\n    alert_id: alertas.length === 1 ? entrada.alertId : `${entrada.alertId}-${i}`,\n    agent_id: entrada.agentId,\n    ingestStartedAt: entrada.ingestStartedAt,\n  },\n}));"
+        "jsCode": "// WF-01 · Normalización al contrato interno de BlinkSec.\n//\n// Punto de desacople del sistema: a partir de aquí nada sabe de qué\n// plataforma vino la alerta. Añadir un tercer SIEM se resuelve escribiendo un\n// normalizador en lib/normalize.js, sin tocar nada aguas abajo.\n\n// @blinksec-inject: lib/normalize.js\n// @blinksec-inject: lib/gateway.js\n\nconst entrada = $input.first().json;\n\nlet alertas;\ntry {\n  alertas = normalize(entrada.source, entrada.rawBody);\n} catch (e) {\n  // Un payload irrecuperable no se procesa a medias: se deriva a WF-99 con el\n  // contexto suficiente para que alguien arregle la regla de origen.\n  throw new Error(`Normalización fallida (${entrada.source}): ${e.message}`);\n}\n\n// Elastic puede traer varias alertas en un solo POST. Cada una deriva su\n// alert_id de SU PROPIO CONTENIDO, no de la posición en el lote.\n//\n// Antes se usaba `${entrada.alertId}-${i}`, donde el id base salía sólo de la\n// PRIMERA alerta del lote. Eso rompía la idempotencia: la misma alerta recibía\n// ids distintos según su posición, así que un lote reenviado con una alerta\n// menos duplicaba el ticket y volvía a ejecutar la contención. Derivar del\n// contenido hace el id estable con independencia del lote en que viaje.\nreturn alertas.map((a) => ({\n  json: {\n    ...a,\n    alert_id: alertas.length === 1\n      ? entrada.alertId\n      : deriveAlertId(a.source, {\n          ruleId: a.rule?.id,\n          eventTimestamp: a.eventTimestamp,\n          host: a.asset?.host,\n          srcIp: (a.artifacts?.ips ?? []).find((i) => i.direction === 'src')?.value,\n        }),\n    agent_id: entrada.agentId,\n    ingestStartedAt: entrada.ingestStartedAt,\n  },\n}));"
       },
       "id": "wf01-normalize",
       "name": "Normalizar",
@@ -58,7 +58,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// WF-01 · Fusión del inventario de activos.\n//\n// asset.criticality es el dato que decide si una contención se ejecuta sola o\n// pasa por un humano. Sin él, el sistema no distingue aislar un portátil de\n// aislar la base de datos de producción.\n\nconst alerta = $('Normalizar').first().json;\nconst filas = $input.all().map((i) => i.json).filter((f) => f && f.hostname);\nconst activo = filas[0];\n\nif (!activo) {\n  // Activo desconocido: se mantiene el 'high' conservador y se deja\n  // constancia. Un inventario incompleto es un hallazgo operativo, no una\n  // excusa para automatizar a ciegas.\n  return [\n    {\n      json: {\n        ...alerta,\n        asset: { ...alerta.asset, criticality: 'high', never_isolate: false, inventoryHit: false },\n      },\n    },\n  ];\n}\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      asset: {\n        ...alerta.asset,\n        criticality: activo.criticality,\n        never_isolate: activo.never_isolate === true,\n        owner_team: activo.owner_team ?? null,\n        inventoryHit: true,\n      },\n    },\n  },\n];"
+        "jsCode": "// WF-01 · Fusión de la criticidad del activo desde el inventario.\n//\n// El inventario es lo que distingue aislar un portátil de aislar la base de\n// datos de producción. Sin él, todo activo se trata como 'high' y toda\n// contención pasa por aprobación humana.\n//\n// Este nodo procesa TODAS las alertas del lote, no sólo la primera.\n//\n// Antes hacía `$('Normalizar').first()` y devolvía UN solo item: con un lote\n// de Elastic de N alertas, las N-1 restantes se descartaban en silencio y la\n// ejecución se reportaba como exitosa. En un SOAR eso son incidentes que nadie\n// llega a ver. Verificado con un lote real de 2 alertas: sólo se guardaba la\n// primera.\n//\n// El emparejamiento alerta↔activo se hace por HOSTNAME, no por posición: el\n// nodo Postgres se ejecuta una vez por item y no garantiza que el orden de sus\n// filas coincida con el de las alertas.\n\nconst alertas = $('Normalizar').all().map((i) => i.json);\n\nconst porHost = new Map();\nfor (const item of $input.all()) {\n  const fila = item.json;\n  if (fila && fila.hostname) porHost.set(String(fila.hostname), fila);\n}\n\nreturn alertas.map((alerta) => {\n  const activo = porHost.get(String(alerta.asset?.host));\n\n  if (!activo) {\n    // Activo desconocido: se mantiene el 'high' conservador y se deja\n    // constancia. Un inventario incompleto es un hallazgo operativo, no una\n    // excusa para automatizar a ciegas.\n    return {\n      json: {\n        ...alerta,\n        asset: { ...alerta.asset, criticality: 'high', never_isolate: false, inventoryHit: false },\n      },\n    };\n  }\n\n  return {\n    json: {\n      ...alerta,\n      asset: {\n        ...alerta.asset,\n        criticality: activo.criticality,\n        never_isolate: activo.never_isolate === true,\n        owner_team: activo.owner_team ?? null,\n        inventoryHit: true,\n      },\n    },\n  };\n});"
       },
       "id": "wf01-merge-asset",
       "name": "Fusionar criticidad",
@@ -95,7 +95,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// WF-01 · Restauración del payload tras la escritura.\n//\n// El nodo Postgres anterior sustituye el item por el resultado de su consulta\n// (aquí: alert_id y es_nueva). Sin restaurar, WF-02 recibiría esa fila en vez\n// de la alerta normalizada y planificaría cero consultas de inteligencia —\n// sin que nada falle visiblemente.\n//\n// De paso se aprovecha `es_nueva` del RETURNING: si el UPSERT actualizó en\n// lugar de insertar, esta alerta ya se procesó antes y es un reenvío.\n\nconst alerta = $('Fusionar criticidad').first().json;\nconst fila = $input.first().json;\n\nreturn [\n  {\n    json: {\n      ...alerta,\n      esReenvio: fila.es_nueva === false,\n    },\n  },\n];"
+        "jsCode": "// WF-01 · Restauración del payload tras el UPSERT.\n//\n// El nodo Postgres SUSTITUYE cada item por el resultado de su consulta. Sin\n// restaurar, aguas abajo llegaría la fila insertada en vez de la alerta.\n//\n// Se restauran TODAS las alertas del lote, no sólo la primera: con .first()\n// un lote de N alertas se reducía a 1 en este punto.\n\nreturn $('Fusionar criticidad').all().map((i) => ({ json: i.json }));"
       },
       "id": "wf01-restore",
       "name": "Restaurar alerta",
@@ -152,7 +152,8 @@
         },
         "options": {
           "waitForSubWorkflow": true
-        }
+        },
+        "mode": "each"
       },
       "id": "wf01-call-enrich",
       "name": "Invocar WF-02 Enriquecimiento",
@@ -161,7 +162,8 @@
       "position": [
         920,
         200
-      ]
+      ],
+      "notes": "mode=each es OBLIGATORIO con lotes. Un POST de Elastic puede traer N alertas; con el modo por defecto ('once') el subflujo recibe los N items en UNA sola ejecucion, y WF-02 ('Planificar consultas' -> $input.first()), WF-03 y todo lo de aguas abajo estan disenados para UNA alerta: solo se enriquecia y puntuaba la primera. Las demas quedaban registradas en blinksec.alerts pero con verdict NULL, sin triaje y sin ticket — invisibles, y la ejecucion se reportaba como exitosa. Verificado en ejecucion real con un lote de 2 alertas. Con mode=each cada alerta recorre el pipeline por su cuenta. Ver R-21 en docs/riesgos.md."
     },
     {
       "parameters": {
@@ -176,7 +178,8 @@
         },
         "options": {
           "waitForSubWorkflow": true
-        }
+        },
+        "mode": "each"
       },
       "id": "wf01-call-triage-direct",
       "name": "Invocar WF-03 sin enriquecer",
@@ -186,7 +189,7 @@
         920,
         400
       ],
-      "notes": "Alerta sin IP ni hash (ej. escalada de privilegios local). No hay nada que consultar a la inteligencia de amenazas; WF-03 aplica el techo 'unenrichable' y la deriva a investigación humana."
+      "notes": "mode=each es OBLIGATORIO con lotes. Un POST de Elastic puede traer N alertas; con el modo por defecto ('once') el subflujo recibe los N items en UNA sola ejecucion, y WF-02 ('Planificar consultas' -> $input.first()), WF-03 y todo lo de aguas abajo estan disenados para UNA alerta: solo se enriquecia y puntuaba la primera. Las demas quedaban registradas en blinksec.alerts pero con verdict NULL, sin triaje y sin ticket — invisibles, y la ejecucion se reportaba como exitosa. Verificado en ejecucion real con un lote de 2 alertas. Con mode=each cada alerta recorre el pipeline por su cuenta. Ver R-21 en docs/riesgos.md."
     }
   ],
   "connections": {

@@ -62,10 +62,28 @@
 	}
 
 	# --- Reanudación de Human-in-the-Loop (Slack) --------------------------
-	# Slack no tiene IP fija razonable de allowlist; aquí la defensa es que la
-	# URL de reanudación es un token de un solo uso generado por el nodo Wait.
+	# Slack no tiene IP fija razonable de allowlist, así que esta ruta queda
+	# abierta por necesidad. La defensa REAL es el token HMAC que WF-05 añade a
+	# la URL del botón y valida al reanudar (lib/gateway.js → verifyResumeToken).
+	#
+	# La URL que genera n8n por sí sola NO es un secreto, al contrario de lo que
+	# decía este comentario antes: su forma es /webhook-waiting/<executionId>/
+	# <sufijo>, con un executionId SECUENCIAL y un sufijo constante. Sin el token
+	# cualquiera podía recorrer ids y aprobar contenciones ajenas. El endpoint
+	# además responde 404 para un id inexistente, así que sirve para enumerar.
+	#
+	# El rate limit acota esa enumeración: sin él, probar todo el espacio de ids
+	# no cuesta nada. Es más estricto que el de ingesta porque un humano pulsa
+	# un botón unas pocas veces, no 120 por minuto.
 	@resume path /webhook-waiting/*
 	handle @resume {
+		rate_limit {
+			zone blinksec_resume {
+				key {remote_host}
+				events 20
+				window 1m
+			}
+		}
 		reverse_proxy n8n-webhook:5678
 	}
 

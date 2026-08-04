@@ -1,7 +1,6 @@
 {
-  "_comment": "Cabeceras del conector Webhook de Kibana. IMPORTANTE: X-BlinkSec-Signature aquí es un token estático, NO un HMAC real — Kibana no ejecuta código y no puede calcular una firma sobre el cuerpo. No protege contra manipulación del payload ni contra reenvío. Compensarlo con SIEM_ALLOWLIST estricta en el Caddyfile. Ver integrations/elastic/README.md y docs/riesgos.md.",
-
-  "Content-Type": "application/json",
+  "_comment": "Cabeceras del conector Webhook de Kibana. (1) X-BlinkSec-Signature es un token ESTATICO, NO un HMAC real: Kibana no ejecuta codigo y no puede firmar el cuerpo. No protege contra manipulacion del payload ni contra reenvio. Debe coincidir con BLINKSEC_STATIC_TOKEN_ELASTIC del .env; si esa variable esta vacia, la ingesta de Elastic queda deshabilitada. Compensarlo con SIEM_ALLOWLIST estricta. (2) Content-Type es text/plain A PROPOSITO: Elastic puede enviar varias alertas como ndjson, que NO es JSON valido. Con application/json el webhook de n8n intenta parsear el cuerpo y responde 422 'Failed to parse request body' ANTES de llegar a WF-00 — verificado en ejecucion real. Con text/plain el cuerpo llega intacto y lib/normalize.js lo recupera con parseLoose(). Ver integrations/elastic/README.md y docs/riesgos.md (R-01).",
+  "Content-Type": "text/plain",
   "X-BlinkSec-Source": "elastic",
   "X-BlinkSec-Timestamp": "{{context.date}}",
   "X-BlinkSec-Signature": "SUSTITUIR_POR_TOKEN_ESTATICO_DE_ELASTIC"

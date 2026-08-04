@@ -210,6 +210,27 @@ test('resolveRuleId no toca la acción si la API no devolvió id (petición fall
   assert.match(resuelta.undo_payload.path, /\{\{RULE_ID\}\}/);
 });
 
+test('resolveRuleId rechaza un ruleId con forma peligrosa (inyección de ruta)', () => {
+  // El id acaba interpolado en la URL de reversión. Un valor con '/' o '?'
+  // desviaría la petición a otra ruta de la API de Cloudflare. Ante algo raro
+  // se conserva el placeholder: la reversión falla de forma visible en vez de
+  // golpear un endpoint equivocado en silencio.
+  const accion = blockIp('1.2.3.4', 'cloudflare', { accountId: 'acc1', alertId: 'x', expiresAt: 'y' });
+  for (const malo of ['../../zones/otra', 'abc/def', 'abc?x=1', 'abc#f', '', 'a'.repeat(200), 'a b']) {
+    const r = resolveRuleId(accion, malo);
+    assert.match(r.undo_payload.path, /\{\{RULE_ID\}\}/, `"${malo}" no debería sustituirse`);
+    assert.deepEqual(r.undo_payload.requires, ['RULE_ID']);
+  }
+});
+
+test('resolveRuleId acepta los ids con la forma real de Cloudflare', () => {
+  const accion = blockIp('1.2.3.4', 'cloudflare', { accountId: 'acc1', alertId: 'x', expiresAt: 'y' });
+  for (const bueno of ['92dd1e2fb6f6470ca1e0c5b1f8bd4d2f', 'rule-abc_123', 'ABC123']) {
+    const r = resolveRuleId(accion, bueno);
+    assert.ok(r.undo_payload.path.endsWith(bueno), `"${bueno}" debería sustituirse`);
+  }
+});
+
 test('resolveRuleId no toca acciones sin requires (isolate_host, revoke_session)', () => {
   const accion = isolateHost('host-abc', { alertId: 'x' });
   const resuelta = resolveRuleId(accion, 'rule-abc123');

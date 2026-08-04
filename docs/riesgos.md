@@ -4,6 +4,164 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
+## R-23 · El aprobador del HITL es autodeclarado, no verificado (ACEPTADO, parcialmente mitigado)
+
+`containment_log.approved_by` sale del parámetro `by` de la URL del botón de
+Slack. Con el token de reanudación (R-21) sólo puede pulsarlo quien recibió el
+mensaje, pero **dentro de ese grupo cualquiera puede escribir el nombre que
+quiera**: "quien dijo ser", no "quien fue".
+
+**Mitigado**: `sanitizeApprover()` en `lib/gateway.js` acota el valor a
+`[\w.@ -]`, 64 caracteres, para que no inyecte saltos de línea ni marcado en
+el registro de auditoría ni en Slack.
+
+**No cerrado**: la identidad sigue sin verificarse. Cerrarlo de verdad exige
+validar la firma de Slack (`X-Slack-Signature`) y tomar el usuario del payload
+firmado en vez de un parámetro de consulta. Pendiente, fuera del alcance de
+esta pasada de correcciones.
+
+## R-22 · Los nodos Code ven todas las variables de entorno (ACEPTADO)
+
+`N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"` es **obligatorio** para que WF-00 lea
+`$env.BLINKSEC_HMAC_SECRET_*` y WF-05 el secreto del token HITL: sin acceso a
+`$env`, la verificación de firma no puede ejecutarse. La opción de n8n es todo
+o nada, no permite exponer sólo algunas variables.
+
+**Consecuencia real**: cualquier nodo Code lee también `N8N_ENCRYPTION_KEY`,
+`DB_POSTGRESDB_PASSWORD` y `QUEUE_BULL_REDIS_PASSWORD` — verificado. Quien
+consiga editar o crear un workflow puede **descifrar todas las credenciales
+guardadas** (Cloudflare, Slack, VirusTotal, AbuseIPDB, CrowdSec). Es una
+escalada de "puedo editar un workflow" a "controlo todas las integraciones".
+
+**Compensación**: el editor sólo es alcanzable desde `MGMT_ALLOWLIST` y exige
+autenticación de n8n (cuenta owner con contraseña, verificado). Los
+contenedores de n8n corren ahora con `cap_drop: ALL` y `no-new-privileges`.
+El acceso al editor debe tratarse como acceso administrativo total al SOAR,
+no como "ver unos flujos".
+
+**Cómo cerrarlo**: mover los secretos a ficheros con las variantes `_FILE` que
+soporta n8n, de modo que no estén en el entorno del proceso. No aplicado aquí
+para no cambiar el manejo de secretos del despliegue en la misma pasada que
+las correcciones de seguridad.
+
+## R-21 · Auditoría de seguridad: fallos encontrados y corregidos (CERRADO)
+
+Auditoría exhaustiva del sistema completo. **No se encontró ningún secreto en
+el historial de git** (19 commits revisados), el SQL está íntegramente
+parametrizado (10 consultas, cero interpolación), los hashes e IPs se validan
+por expresión regular antes de entrar en ninguna URL, y el motor de puntuación
+resiste entradas malformadas (`null`, `{}`, `NaN`) sin fallar. Lo que sí
+apareció:
+
+**CRÍTICO — el Human-in-the-Loop se podía saltar por completo.** La URL de
+reanudación es `/webhook-waiting/<executionId>/<sufijo>`. Verificado en la base
+de datos: los `executionId` son **secuenciales** (1, 2, 3…), y el sufijo era la
+constante `"decision"`. La ruta `/webhook-waiting/*` no tenía allowlist ni rate
+limit en el Caddyfile. Verificado contra el endpoint real: responde `404 "The
+execution N does not exist"` — **no `401`**, así que además sirve de oráculo
+para enumerar qué ejecuciones existen. Cualquiera capaz de alcanzar Caddy podía
+recorrer ids y **ejecutar contenciones reales** con
+`?decision=approve&by=<nombre inventado>`.
+
+El comentario del código afirmaba que la URL era "un token de un solo uso, lo
+que hace innecesario autenticar el callback". Era **falso**: no había token,
+sólo un entero secuencial y una constante. Origen del fallo: el diseño usaba
+`{{ $json.alert_id }}` como sufijo (32 hex, no adivinable), no resolvía en
+tiempo de ejecución y se sustituyó por una constante — se arregló el fallo
+funcional y se abrió el agujero sin advertirlo.
+
+*Corregido*: `computeResumeToken` / `verifyResumeToken` en `lib/gateway.js`
+(HMAC ligado a ejecución **y** alerta), embebido en la URL del botón y validado
+al reanudar. Un token inválido se trata como rechazo, nunca como "aprobar
+igualmente". WF-05 falla ruidosamente si falta `BLINKSEC_HITL_TOKEN_SECRET`, en
+vez de mandar un botón que cualquiera podría pulsar. Rate limit de 20/min en
+`/webhook-waiting/*`. Siete tests de regresión.
+
+**CRÍTICO — pérdida silenciosa de alertas.** `Normalizar` (WF-01) emite N
+alertas para un lote de Elastic, pero `Fusionar criticidad` hacía
+`$('Normalizar').first()` y devolvía **un solo item**. Verificado en ejecución
+real con un lote de 2 alertas: sólo se guardó `lap-fin-204`; **`lap-fin-207`
+desapareció sin error y la ejecución se reportó como exitosa**. En un SOAR eso
+son incidentes que nadie llega a ver. Además `filas[0]` asignaba el activo del
+inventario del primer item a todos.
+
+*Corregido*: WF-01 procesa el lote completo y empareja alerta↔activo **por
+hostname**, no por posición (el nodo Postgres no garantiza el orden). Mismo
+arreglo en `Restaurar alerta`.
+
+Al verificarlo en vivo apareció que **la pérdida sólo se había desplazado**:
+con WF-01 ya emitiendo las N alertas, los nodos Execute Workflow estaban en el
+modo por defecto (`once`), que entrega los N items al subflujo en UNA sola
+ejecución. Pero WF-02 (`Planificar consultas` → `$input.first()`), WF-03 y todo
+lo de aguas abajo están diseñados para UNA alerta: sólo se enriquecía y
+puntuaba la primera. Las demás quedaban en `blinksec.alerts` con `verdict`
+NULL — registradas pero sin triaje, sin ticket y sin contención, invisibles en
+cualquier panel que filtre por veredicto. *Corregido*: `mode: each` en los dos
+Execute Workflow de WF-01, de modo que cada alerta recorre el pipeline por su
+cuenta.
+
+*Verificado en ejecución real* con el lote de 2 alertas: ambas se guardan,
+ambas completan el triaje con veredictos distintos (`false_positive` 12 y
+`investigate` 37 — puntuadas de forma independiente, no copiada la primera), y
+reenviar el mismo lote no duplica nada (2 filas, 2 ids).
+
+**ALTO — la ingesta de Elastic no funcionaba, por dos motivos independientes.**
+(1) Con `Content-Type: application/json` —lo que manda el conector real— n8n
+rechaza el ndjson con `422 "Failed to parse request body"` **antes** de llegar
+al código: toda la recuperación `parseLoose()`, con tests propios que pasaban,
+era inalcanzable en producción. (2) El token estático que documenta el conector
+**nunca puede igualar un HMAC**: `401` siempre. R-01 lo describía como "postura
+inferior pero impide el POST anónimo"; en realidad no ingería nada.
+
+*Corregido*: el conector declara `Content-Type: text/plain` (verificado: con
+ese tipo el cuerpo llega intacto y `parseLoose()` lo recupera), y
+`verifyRequest` admite una vía explícita de token estático por origen, con el
+HMAC siempre por delante y la ventana anti-replay intacta. Un origen sin
+secreto ni token queda **deshabilitado**, no abierto.
+
+**ALTO — WF-07 enviaba acciones de CrowdStrike a Cloudflare.** La consulta
+seleccionaba `isolate_host`, pero el nodo tenía `DELETE` y la URL de Cloudflare
+fijos: un `lift_containment` de CrowdStrike habría acabado en
+`api.cloudflare.com`. *Corregido*: filtro `platform = 'cloudflare'` y método
+tomado del propio `undo_payload`. Mismo arreglo en WF-08.
+
+**ALTO — WF-07 sólo revertía una contención por ciclo.** `Evaluar resultado`
+usaba `.first()` con `LIMIT 50` y devolvía un item: con 10 vencidas sólo se
+marcaba 1, y el resultado HTTP se atribuía a la fila equivocada. Es exactamente
+el fallo documentado y corregido en WF-08, que nunca se aplicó aquí.
+*Corregido*: `mode: runOnceForEachItem` + `.item`. Los nodos de WF-08 usaban
+`.item` en el modo por defecto (`runOnceForAllItems`), donde no hay item que
+emparejar — también corregidos.
+
+**ALTO — idempotencia rota en lotes.** El `alert_id` se derivaba de la primera
+alerta del lote más un índice, así que la misma alerta recibía ids distintos
+según su posición: ticket duplicado y contención ejecutada dos veces.
+*Corregido*: cada alerta deriva su id de su propio contenido.
+
+**Los botones de Slack nunca funcionaron.** Las URLs se construían con
+`{{ $execution.resumeUrl }}` dentro de una plantilla de JavaScript, donde las
+llaves son **texto literal**; el nodo Slack recibe los bloques ya serializados
+con `JSON.stringify` y no vuelve a evaluar nada. El botón salía con la cadena
+sin resolver. Pasó desapercibido porque el ensayo de R-13 reanudó golpeando el
+webhook directamente, no pulsando el botón. *Corregido* al reescribir el nodo
+para C-1.
+
+**Menores corregidos**: `resolveRuleId` valida ahora la forma del id de regla
+(un valor con `/` o `?` habría desviado la petición de reversión a otra ruta de
+la API); `__pycache__` estaba versionado y no cubierto por `.gitignore`; se
+añadió `package-lock.json` (`npm audit`: 0 vulnerabilidades); el esquema tiene
+`CHECK` sobre `platform` (una errata dejaría una regla de firewall activa para
+siempre sin que nada lo señalara); los contenedores llevan
+`no-new-privileges` y `cap_drop: ALL` donde es viable.
+
+**Meta-hallazgo, sin cerrar**: 158 tests en verde mientras tres de estos fallos
+estaban vivos. **Ningún test ejercita el cableado de los workflows**, sólo los
+módulos por separado — por eso `.first()` sobre un nodo multi-item pasó
+inadvertido tres veces. Cerrarlo exige ejecutar los flujos contra los mocks en
+CI con lotes multi-alerta, y una guarda en el compilador contra `.first()`
+aguas abajo de una fuente multi-item. Pendiente, fuera del alcance de esta
+pasada.
+
 ## R-20 · Cloudflare conectado y verificado; WF-07 quedaba inactivo tras reimportar (CERRADO)
 
 Al aplicar en vivo el trabajo de R-19/R-20 (retirar Wazuh/TheHive,
@@ -188,14 +346,29 @@ código: no puede calcular un HMAC sobre el cuerpo. La cabecera
 protege contra manipulación del payload en tránsito ni contra reenvío. Sólo
 impide el POST anónimo.
 
+**Corrección de este mismo riesgo (ver R-21).** Este apartado afirmaba que el
+token estático "sólo impide el POST anónimo", dando a entender que la ingesta
+de Elastic funcionaba con una postura inferior. **No funcionaba en absoluto**:
+`verifyRequest` sólo tenía la vía HMAC, y un token estático nunca puede igualar
+un HMAC, así que Elastic devolvía `401` siempre. Además, con el
+`Content-Type: application/json` que declaraba el conector, n8n rechazaba el
+ndjson con `422` antes incluso de llegar a la verificación. Ambas cosas están
+corregidas: hay una vía explícita de token estático por origen y el conector
+declara `text/plain`.
+
 **Compensación.** `SIEM_ALLOWLIST` estricta en el Caddyfile, restringida a la
 IP del nodo de Kibana, y despliegue en red privada. La postura de seguridad de
-la ingesta de Elastic es **medible pero realmente inferior** a la de Wazuh y
-Splunk, que sí firman.
+la ingesta de Elastic es **medible pero realmente inferior** a la de Splunk,
+que sí firma. Con `BLINKSEC_STATIC_TOKEN_ELASTIC` vacío la ingesta de Elastic
+queda deshabilitada, que es el estado por defecto: rechazar, no aceptar sin
+verificar.
 
 **Cómo cerrarlo.** Un salto intermedio (Logstash con filtro Ruby, o una función
 serverless) que reciba de Elastic y reenvíe firmado con el esquema común. Es la
 única forma de igualar la postura.
+
+> Nota: Wazuh se retiró del sistema (R-19); la comparación de postura es hoy
+> sólo frente a Splunk.
 
 ## R-02 · Cuota de VirusTotal (MITIGADO, no eliminado)
 

@@ -36,7 +36,7 @@
     },
     {
       "parameters": {
-        "method": "POST",
+        "method": "={{ $json.accion.request.method }}",
         "url": "=https://api.cloudflare.com/client/v4{{ $json.accion.request.path }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
@@ -71,11 +71,12 @@
       "maxTries": 3,
       "waitBetweenTries": 3000,
       "onError": "continueRegularOutput",
-      "notes": "Cloudflare es la única plataforma de bloqueo de IP soportada tras retirar Wazuh (ver docs/riesgos.md, R-19). Método fijo en POST porque lib/containment.js sólo construye una acción de creación de regla para esta plataforma — si se añade una segunda plataforma con otro verbo, este nodo deberá volverse dinámico como el resto (usar $json.accion.request.method). Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
+      "notes": "El método sale de la propia acción, no fijo. Estaba fijo en POST: en cuanto se active una plataforma que use otro verbo, la petición saldría mal formada. La URL base sigue siendo la de Cloudflare —única plataforma de bloqueo soportada tras retirar Wazuh (R-19)—, así que añadir CrowdStrike o Entra ID exige enrutar por accion.platform primero. Reintento con backoff: un fallo de red al bloquear deja la amenaza activa."
     },
     {
       "parameters": {
-        "jsCode": "// WF-04 · Restauración del payload tras ejecutar la contención.\n//\n// El nodo HTTP Request SUSTITUYE el item por su propia respuesta (body,\n// headers, statusCode) — igual que un nodo Postgres sustituye el item por el\n// resultado de su consulta. Sin restaurar aquí, 'Registrar en\n// containment_log' recibe { body, headers, statusCode } en vez de la alerta,\n// y $json.alert_id / $json.accion llegan undefined. El síntoma en n8n no\n// menciona el HTTP node en ningún sitio: el Postgres node falla con\n// 'Query Parameters must be a string of comma-separated values or an array\n// of values', un error genérico que no apunta a la causa real. Encontrado en\n// el ensayo de contención de la Fase 7.\n//\n// Se usa $(...).item, NO $(...).first(): con dos acciones para la misma\n// alerta (ej. bloqueo de IP + aislamiento de host), .first() asignaría\n// siempre la PRIMERA acción a todas las filas de containment_log. .item\n// resuelve por pairedItem al item que realmente corresponde a esta\n// ejecución concreta del nodo.\n//\n// También resuelve el RULE_ID de Cloudflare: el id de la regla recién\n// creada sólo se conoce aquí, en la respuesta real. Sin esto, el\n// undo_payload persistido en containment_log conservaría el placeholder\n// literal '{{RULE_ID}}' y WF-07 jamás podría revertir el bloqueo.\n\n// @blinksec-inject: lib/containment.js\n\nconst origen = $('Separar acciones').item.json;\nconst respuesta = $input.first().json;\n\nconst ruleId = respuesta.body?.result?.id ?? null;\nconst accion = resolveRuleId(origen.accion, ruleId);\n\nreturn [\n  {\n    json: {\n      ...origen,\n      accion,\n      httpStatus: respuesta.statusCode ?? null,\n    },\n  },\n];"
+        "jsCode": "// WF-08 · Restauración del payload tras ejecutar la contención.\n//\n// El nodo HTTP Request SUSTITUYE el item por su propia respuesta (body,\n// headers, statusCode). Sin restaurar aquí, 'Registrar en containment_log'\n// recibe { body, headers, statusCode } en vez de la alerta, y $json.alert_id\n// llega undefined. El síntoma no menciona el HTTP node: el Postgres falla con\n// 'Query Parameters must be a string of comma-separated values or an array of\n// values', un error genérico que no apunta a la causa real.\n//\n// mode=runOnceForEachItem: .item SÓLO resuelve el item emparejado en este\n// modo. Estaba usando .item con el modo por defecto (runOnceForAllItems),\n// donde no hay item actual que resolver — con dos acciones para la misma\n// alerta (bloqueo de IP + aislamiento) el emparejamiento no era fiable.\n//\n// También resuelve el RULE_ID de Cloudflare: el id de la regla recién creada\n// sólo se conoce aquí, en la respuesta real. Sin esto, el undo_payload\n// persistido conservaría el placeholder literal y WF-07 jamás podría revertir.\n\n// @blinksec-inject: lib/containment.js\n\nconst origen = $('Separar acciones').item.json;\nconst respuesta = $input.item.json;\n\nconst ruleId = respuesta.body?.result?.id ?? null;\nconst accion = resolveRuleId(origen.accion, ruleId);\n\nreturn {\n  json: {\n    ...origen,\n    accion,\n    httpStatus: respuesta.statusCode ?? null,\n  },\n};",
+        "mode": "runOnceForEachItem"
       },
       "id": "wf04-restore-post-http",
       "name": "Restaurar tras ejecutar",
@@ -113,7 +114,8 @@
     },
     {
       "parameters": {
-        "jsCode": "// WF-04 · Restauración del payload tras registrar la contención.\n//\n// El INSERT en containment_log deja su propio resultado en el item. WF-06\n// necesita la alerta completa con su plan para componer el ticket: sin\n// restaurar, el ticket saldría vacío de contexto justo en el caso que más\n// importa documentar, el de una contención ya ejecutada.\n//\n// $(...).item, no .first(): con más de una acción por alerta, .first()\n// asignaría siempre la primera a todas las invocaciones de WF-06.\n\nconst base = $('Separar acciones').item.json;\n\nreturn [{ json: base }];"
+        "jsCode": "// WF-08 · Restauración del payload tras registrar la contención.\n//\n// El INSERT en containment_log deja su propio resultado en el item. WF-06\n// necesita la alerta completa con su plan para componer el ticket: sin\n// restaurar, el ticket saldría vacío de contexto justo en el caso que más\n// importa documentar, el de una contención ya ejecutada.\n//\n// mode=runOnceForEachItem: .item sólo resuelve el item emparejado en este\n// modo (ver la nota del nodo anterior).\n\nreturn { json: $('Separar acciones').item.json };",
+        "mode": "runOnceForEachItem"
       },
       "id": "wf04-restore",
       "name": "Restaurar alerta contenida",

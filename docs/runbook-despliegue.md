@@ -11,7 +11,18 @@ Generar cada secreto:
 ```bash
 openssl rand -base64 32   # POSTGRES_PASSWORD, REDIS_PASSWORD, N8N_ENCRYPTION_KEY
 openssl rand -hex 32      # BLINKSEC_HMAC_SECRET_* (uno por plataforma)
+openssl rand -hex 32      # BLINKSEC_HITL_TOKEN_SECRET  ← OBLIGATORIO
 ```
+
+`BLINKSEC_HITL_TOKEN_SECRET` no es opcional: es lo que autoriza la reanudación
+del Human-in-the-Loop. La URL que genera el nodo Wait es adivinable por sí sola
+(`executionId` secuencial + sufijo constante), así que sin este secreto
+cualquiera que alcance el endpoint puede aprobar contenciones ajenas. WF-05
+falla de forma explícita si falta, en vez de mandar un botón sin proteger — ver
+R-21 en `riesgos.md`.
+
+`BLINKSEC_STATIC_TOKEN_ELASTIC` sólo hace falta si se ingesta desde Elastic.
+Dejarlo **vacío deshabilita** ese origen, que es el valor seguro por defecto.
 
 `N8N_ENCRYPTION_KEY` se guarda además fuera del servidor. Si se pierde, todas
 las credenciales almacenadas en n8n son irrecuperables y hay que recrearlas a

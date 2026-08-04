@@ -89,7 +89,14 @@ CREATE TABLE IF NOT EXISTS blinksec.containment_log (
     action_type  TEXT NOT NULL
                  CHECK (action_type IN ('block_ip','isolate_host','revoke_session','kill_process')),
     target       TEXT NOT NULL,
-    platform     TEXT NOT NULL,             -- wazuh_ar | cloudflare | crowdstrike | entra_id
+    -- CHECK explícito: una errata en el nombre de la plataforma haría que
+    -- WF-07 nunca encontrara la fila para revertirla, dejando una regla de
+    -- firewall activa para siempre sin que nada lo señale. Wazuh se retiró del
+    -- sistema (ver docs/riesgos.md, R-19); hoy sólo cloudflare está operativa,
+    -- las demás las construye lib/containment.js pero no hay ruta que las
+    -- ejecute todavía.
+    platform     TEXT NOT NULL
+                 CHECK (platform IN ('cloudflare','crowdstrike','entra_id','google_workspace')),
     -- Comando/llamada exacta para deshacer. Se rellena en el momento de
     -- ejecutar, no se reconstruye después.
     undo_payload JSONB NOT NULL,

@@ -21,6 +21,10 @@ docker/docker-compose.override.yml
 workflows/*.raw.json
 workflows/_export/
 
+# Python (los .pyc no aportan y se regeneran solos)
+__pycache__/
+*.pyc
+
 # Runtime
 node_modules/
 data/
