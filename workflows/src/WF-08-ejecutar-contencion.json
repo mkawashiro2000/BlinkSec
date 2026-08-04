@@ -36,8 +36,8 @@
     },
     {
       "parameters": {
-        "method": "PUT",
-        "url": "=https://wazuh.example.com:55000/active-response",
+        "method": "POST",
+        "url": "=https://api.cloudflare.com/client/v4{{ $json.accion.request.path }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -63,15 +63,15 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "blinksec-wazuh",
-          "name": "Wazuh API"
+          "id": "blinksec-cloudflare",
+          "name": "Cloudflare API"
         }
       },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 3000,
       "onError": "continueRegularOutput",
-      "notes": "Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
+      "notes": "Cloudflare es la única plataforma de bloqueo de IP soportada tras retirar Wazuh (ver docs/riesgos.md, R-19). Método fijo en POST porque lib/containment.js sólo construye una acción de creación de regla para esta plataforma — si se añade una segunda plataforma con otro verbo, este nodo deberá volverse dinámico como el resto (usar $json.accion.request.method). Reintento con backoff: un fallo de red al bloquear deja la amenaza activa. Se registra el resultado real en containment_log, éxito o fracaso."
     },
     {
       "parameters": {

@@ -50,7 +50,7 @@ MAX_FILAS = 20
 def firmar(cuerpo, secreto, timestamp):
     """HMAC-SHA256 sobre '<timestamp>.<cuerpo>'.
 
-    Idéntico al esquema de integrations/wazuh/custom-n8n.py y verificado por
+    Idéntico al esquema HMAC que verifica lib/gateway.js, cubierto por
     lib/gateway.js. Incluir el timestamp en el material firmado impide reenviar
     una petición capturada con un timestamp nuevo.
     """

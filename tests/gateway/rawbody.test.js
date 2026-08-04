@@ -25,7 +25,7 @@ const CUERPO_ORIGINAL = '{\n  "rule": { "id": "5712" },\n  "data": { "srcip": "4
 
 const ITEM_REAL_N8N_1_72 = {
   json: {
-    headers: { 'content-type': 'application/json', 'x-blinksec-source': 'wazuh' },
+    headers: { 'content-type': 'application/json', 'x-blinksec-source': 'splunk' },
     params: {},
     query: {},
     body: { rule: { id: '5712' }, data: { srcip: '45.155.205.233' } },
@@ -101,7 +101,7 @@ test('verifyRequest valida usando el cuerpo extraído del binario', () => {
     json: {
       ...ITEM_REAL_N8N_1_72.json,
       headers: {
-        'x-blinksec-source': 'wazuh',
+        'x-blinksec-source': 'splunk',
         'x-blinksec-timestamp': ts,
         'x-blinksec-signature': `sha256=${firma}`,
       },
@@ -110,9 +110,9 @@ test('verifyRequest valida usando el cuerpo extraído del binario', () => {
 
   const resultado = verifyRequest(
     { headers: item.json.headers, rawBody: extractRawBody(item) },
-    { secrets: { wazuh: secreto }, windowSeconds: 300 },
+    { secrets: { splunk: secreto }, windowSeconds: 300 },
   );
 
-  assert.equal(resultado.source, 'wazuh');
+  assert.equal(resultado.source, 'splunk');
   assert.equal(resultado.rawBody, CUERPO_ORIGINAL);
 });

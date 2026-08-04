@@ -94,7 +94,8 @@ test('toda acción nace con undo_payload y expires_at', () => {
   const plan = planContainment(alerta, veredictoCritico, {
     now: AHORA,
     agentId: '004',
-    platforms: { ip: 'wazuh_ar', endpoint: 'crowdstrike', identity: 'entra_id' },
+    accountId: 'acc1',
+    platforms: { ip: 'cloudflare', endpoint: 'crowdstrike', identity: 'entra_id' },
   });
 
   assert.equal(plan.actions.length, 3);
@@ -105,13 +106,11 @@ test('toda acción nace con undo_payload y expires_at', () => {
   }
 });
 
-test('el bloqueo de IP en Wazuh se acota al agente afectado', () => {
-  // Sin agents_list, Wazuh propaga la respuesta activa a TODA la flota. Ese
-  // es el fallo que convierte una contención en un incidente propio.
-  const accion = blockIp('1.2.3.4', 'wazuh_ar', { agentId: '004' });
-  assert.deepEqual(accion.request.body.agents_list, ['004']);
-  assert.equal(accion.undo_payload.body.command, '!firewall-drop-stop');
-  assert.deepEqual(accion.undo_payload.body.agents_list, ['004']);
+test('el bloqueo en Cloudflare incluye el modo block y una nota de contexto', () => {
+  const accion = blockIp('1.2.3.4', 'cloudflare', { accountId: 'acc1', alertId: 'abc123', expiresAt: '2026-08-03T12:00:00Z' });
+  assert.equal(accion.request.body.mode, 'block');
+  assert.equal(accion.request.body.configuration.value, '1.2.3.4');
+  assert.match(accion.request.body.notes, /abc123/);
 });
 
 test('el bloqueo en Cloudflare declara que su reversión necesita el RULE_ID', () => {
@@ -146,7 +145,7 @@ test('no aísla el endpoint por una IP atacante externa sin hash en el host', ()
   // Que alguien te escanee no justifica desconectar tu servidor de la red.
   const plan = planContainment(alertaCritica, veredictoCritico, {
     now: AHORA,
-    platforms: { ip: 'wazuh_ar', endpoint: 'crowdstrike' },
+    platforms: { ip: 'cloudflare', endpoint: 'crowdstrike' },
   });
   assert.ok(!plan.actions.some((a) => a.action_type === 'isolate_host'));
   assert.ok(plan.actions.some((a) => a.action_type === 'block_ip'));
@@ -154,7 +153,7 @@ test('no aísla el endpoint por una IP atacante externa sin hash en el host', ()
 
 test('no planifica acciones para plataformas no configuradas', () => {
   const alerta = { ...alertaCritica, identity: { user: 'u@corp.com' } };
-  const plan = planContainment(alerta, veredictoCritico, { now: AHORA, platforms: { ip: 'wazuh_ar' } });
+  const plan = planContainment(alerta, veredictoCritico, { now: AHORA, platforms: { ip: 'cloudflare' } });
   assert.ok(!plan.actions.some((a) => a.action_type === 'revoke_session'));
 });
 
@@ -169,7 +168,7 @@ test('bloquea tanto la IP de origen como el destino de C2', () => {
       hashes: [],
     },
   };
-  const plan = planContainment(alerta, veredictoCritico, { now: AHORA, platforms: { ip: 'wazuh_ar' } });
+  const plan = planContainment(alerta, veredictoCritico, { now: AHORA, platforms: { ip: 'cloudflare' } });
   assert.equal(plan.actions.filter((a) => a.action_type === 'block_ip').length, 2);
 });
 

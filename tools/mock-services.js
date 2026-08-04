@@ -4,13 +4,13 @@
  * BlinkSec — mocks de proveedores externos para el ensayo de contención de
  * la Fase 7 (WF-04, WF-05, WF-07).
  *
- * Sustituye a AbuseIPDB, VirusTotal, Wazuh y TheHive mientras no hay
- * credenciales ni infraestructura real disponibles. Escucha en HTTP plano
- * (sin TLS) y enruta por ruta, no por Host, así que un único proceso basta
- * para todos los proveedores dentro de la red docker interna.
+ * Sustituye a AbuseIPDB, VirusTotal, CrowdSec CTI y Cloudflare mientras no
+ * hay credenciales ni infraestructura real disponibles. Escucha en HTTP
+ * plano (sin TLS) y enruta por ruta, no por Host, así que un único proceso
+ * basta para todos los proveedores dentro de la red docker interna.
  *
- * GreyNoise e IBM X-Force se retiraron del sistema (ver docs/riesgos.md) y
- * ya no tienen mock aquí.
+ * GreyNoise, IBM X-Force, Wazuh y TheHive se retiraron del sistema (ver
+ * docs/riesgos.md) y ya no tienen mock aquí.
  *
  * NO ES CÓDIGO DE PRODUCCIÓN. Vive fuera de lib/ y workflows/ a propósito:
  * nunca se inyecta en un workflow ni se importa desde otro módulo del repo.
@@ -104,25 +104,17 @@ const servidor = http.createServer(async (req, res) => {
   if (url.pathname.startsWith('/api/v3/ip_addresses/')) return json(res, 200, virustotal(false));
   if (url.pathname.startsWith('/v2/smoke/')) return json(res, 200, crowdsec());
 
-  // --- Wazuh: ejecución y reversión de respuesta activa -------------------
-  if (url.pathname === '/active-response' && req.method === 'PUT') {
+  // --- Cloudflare: bloqueo y reversión de IP -------------------------------
+  if (url.pathname.match(/^\/accounts\/[^/]+\/firewall\/access_rules\/rules$/) && req.method === 'POST') {
     const cuerpo = await leerCuerpo(req);
     registro.push({ ...entrada, cuerpo });
-    console.log(`[mock-wazuh] active-response: ${JSON.stringify(cuerpo)}`);
-    return json(res, 200, { error: 0, data: { affected_items: [cuerpo.agents_list ?? []] } });
+    console.log(`[mock-cloudflare] regla creada: ${JSON.stringify(cuerpo)}`);
+    return json(res, 200, { success: true, result: { id: `mock-rule-${Date.now()}` } });
   }
-
-  // --- TheHive --------------------------------------------------------------
-  if (url.pathname === '/api/v1/alert' && req.method === 'POST') {
-    const cuerpo = await leerCuerpo(req);
-    registro.push({ ...entrada, cuerpo });
-    console.log(`[mock-thehive] alerta creada: ${cuerpo.title ?? cuerpo.sourceRef ?? '(sin título)'}`);
-    return json(res, 201, { _id: `mock-ticket-${Date.now()}` });
-  }
-  if (url.pathname === '/api/v1/alert/_bulk' && req.method === 'POST') {
-    const cuerpo = await leerCuerpo(req);
-    registro.push({ ...entrada, cuerpo });
-    return json(res, 200, { ok: true });
+  if (url.pathname.match(/^\/accounts\/[^/]+\/firewall\/access_rules\/rules\/[^/]+$/) && req.method === 'DELETE') {
+    registro.push({ ...entrada });
+    console.log(`[mock-cloudflare] regla eliminada: ${url.pathname}`);
+    return json(res, 200, { success: true });
   }
 
   // --- Introspección para las aserciones del ensayo ------------------------

@@ -283,7 +283,7 @@
   "meta": {
     "blinksec": {
       "fase": 2,
-      "descripcion": "Convierte los esquemas de Wazuh, Splunk y Elastic en el contrato interno y adjunta la criticidad del activo desde el inventario.",
+      "descripcion": "Convierte los esquemas de Splunk y Elastic en el contrato interno y adjunta la criticidad del activo desde el inventario.",
       "tests": "tests/fixtures/normalize.test.js"
     }
   }

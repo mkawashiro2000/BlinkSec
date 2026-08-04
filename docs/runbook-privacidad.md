@@ -11,11 +11,12 @@ editor de n8n que a la consola del SIEM.
 
 ## Controles implementados
 
-### 1. Recorte en origen (`custom-n8n.py`)
+### 1. Recorte en origen (`send_to_blinksec.py`)
 
-`full_log` se trunca a 512 caracteres antes de salir del manager de Wazuh. Es
-el campo que más veces contiene credenciales, porque recoge la línea de log
-íntegra.
+El emisor de Splunk descarta los campos internos (`_raw`, `_indextime`, …)
+antes de construir el payload — conserva sólo `_time`, que sí importa para
+el triaje. `_raw` es el campo que más veces contiene credenciales, porque
+recoge la línea de log íntegra.
 
 Los datos que nunca se necesitaron no pueden filtrarse: recortar en el emisor
 es más efectivo que sanear en el destino.
@@ -92,12 +93,12 @@ LIMIT 10;
 
 Un resultado no vacío significa que el recorte en origen no está cubriendo
 algún camino. Investigar qué regla lo genera y ampliar el filtro de
-`custom-n8n.py`.
+`send_to_blinksec.py`.
 
 ## Acceso
 
 - El editor de n8n sólo es alcanzable desde `MGMT_ALLOWLIST` (ver `Caddyfile`).
 - Los accesos al editor deben tratarse como accesos a datos del SIEM, con el
-  mismo control que la consola de Wazuh.
+  mismo control que la consola del SIEM de origen.
 - El acceso a `/webhook/*` no da visibilidad sobre datos: sólo permite enviar,
   y sin la firma HMAC ni eso.

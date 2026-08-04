@@ -60,8 +60,6 @@ jobs:
       - name: Compilar los scripts de integración
         run: |
           python3 -m py_compile \
-            integrations/wazuh/custom-n8n.py \
-            integrations/wazuh/custom-ar.py \
             integrations/splunk/send_to_blinksec.py
       - name: Self-test de firma del emisor de Splunk
         run: python3 integrations/splunk/send_to_blinksec.py --self-test

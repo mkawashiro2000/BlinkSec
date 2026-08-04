@@ -180,45 +180,6 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://thehive.example.com/api/v1/alert/_bulk",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ sourceRef: $json.alert_id, status: 'Ignored', summary: 'Cerrada automáticamente por BlinkSec: ' + ($json.triage.rationale ?? []).join('; ') }) }}",
-        "options": {
-          "timeout": 8000,
-          "response": {
-            "response": {
-              "fullResponse": true,
-              "neverError": true
-            }
-          }
-        }
-      },
-      "id": "wf03-close-siem",
-      "name": "Cerrar alerta en SIEM",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        560,
-        120
-      ],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "blinksec-thehive",
-          "name": "TheHive API"
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 3000,
-      "onError": "continueRegularOutput",
-      "notes": "Wazuh no tiene concepto de 'cerrar alerta': no hay estado que actualizar en el manager. El cierre se materializa marcando la alerta como Ignored en TheHive, que es donde el analista mira. Si se usa Splunk ES o Elastic, sustituir por su API de estado de notable/caso — ver docs/runbook-despliegue.md."
-    },
-    {
-      "parameters": {
         "workflowId": {
           "__rl": true,
           "value": "blinksecwf06tick",
@@ -340,7 +301,7 @@
       "main": [
         [
           {
-            "node": "Cerrar alerta en SIEM",
+            "node": "Registrar métricas",
             "type": "main",
             "index": 0
           }
@@ -355,17 +316,6 @@
         [
           {
             "node": "Invocar WF-04 Contención",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Cerrar alerta en SIEM": {
-      "main": [
-        [
-          {
-            "node": "Registrar métricas",
             "type": "main",
             "index": 0
           }

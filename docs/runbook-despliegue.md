@@ -128,8 +128,7 @@ esperan los nodos:
 | `blinksec-abuseipdb` | Header Auth | `Key: <API key>` + `Accept: application/json` |
 | `blinksec-virustotal` | Header Auth | `x-apikey: <API key>` |
 | `blinksec-crowdsec` | Header Auth | `x-api-key: <API key>` (obtenida en app.crowdsec.net → CTI) |
-| `blinksec-thehive` | Header Auth | `Authorization: Bearer <key>` |
-| `blinksec-wazuh` | Header Auth | `Authorization: Bearer <JWT>` |
+| `blinksec-cloudflare` | Header Auth | `Authorization: Bearer <API Token>` |
 | `blinksec-slack` | Slack API | scopes `chat:write`, `chat:write.public` |
 
 ## 3. Workflows
@@ -186,44 +185,26 @@ INSERT INTO blinksec.ip_allowlist (cidr, reason, added_by) VALUES
 Omitir la allowlist es el error más caro posible: un bloqueo automático sobre
 la VPN desconecta a toda la plantilla en teletrabajo.
 
-## 5. Wazuh
+## 5. Wazuh y TheHive — retirados del sistema
 
-```bash
-cp integrations/wazuh/custom-n8n.py /var/ossec/integrations/custom-n8n
-chown root:wazuh /var/ossec/integrations/custom-n8n
-chmod 750 /var/ossec/integrations/custom-n8n
-
-cp integrations/wazuh/custom-ar.py /var/ossec/active-response/bin/custom-ar
-chown root:wazuh /var/ossec/active-response/bin/custom-ar
-chmod 750 /var/ossec/active-response/bin/custom-ar
-```
-
-El nombre del wrapper **no lleva extensión**: Wazuh busca el ejecutable por el
-valor de `<name>` del bloque `<integration>`.
-
-Insertar `integrations/wazuh/ossec.conf.snippet.xml` dentro de `<ossec_config>`
-en `/var/ossec/etc/ossec.conf`, poniendo el secreto real en `<api_key>`, y:
-
-```bash
-systemctl restart wazuh-manager
-tail -f /var/ossec/logs/integrations-blinksec.log
-```
-
-Si aparece `401`, el secreto de `ossec.conf` no coincide con
-`BLINKSEC_HMAC_SECRET_WAZUH`. Si aparece `403`, falta la IP del manager en
-`SIEM_ALLOWLIST`.
+Wazuh (como fuente de ingesta y como plataforma de contención vía
+active-response) y TheHive (como destino de ticketing) se retiraron por
+completo del sistema. Ver R-19 en `riesgos.md` para el porqué. Quedan dos
+fuentes de ingesta (Splunk, Elastic) y Cloudflare como única plataforma de
+bloqueo de IP; el ticketing vive sólo en Postgres (WF-06) hasta que se
+conecte una plataforma externa real.
 
 ## 6. Verificación del gateway y de las credenciales
 
 Antes de nada, comprobar que el gateway rechaza lo que debe. Con el secreto de
-`BLINKSEC_HMAC_SECRET_WAZUH`:
+`BLINKSEC_HMAC_SECRET_SPLUNK`:
 
 ```bash
 docker compose -f docker/docker-compose.yml cp tools/load-test.js n8n-webhook:/tmp/lt.js
 ```
 
 ```bash
-docker compose -f docker/docker-compose.yml exec n8n-webhook node /tmp/lt.js http://localhost:5678/webhook/blinksec/ingest "$BLINKSEC_HMAC_SECRET_WAZUH" 20 4
+docker compose -f docker/docker-compose.yml exec n8n-webhook node /tmp/lt.js http://localhost:5678/webhook/blinksec/ingest "$BLINKSEC_HMAC_SECRET_SPLUNK" 20 4
 ```
 
 Todas las respuestas deben ser `200`. Una petición sin firma debe dar `401`, y

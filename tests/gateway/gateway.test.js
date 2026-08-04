@@ -22,7 +22,6 @@ const {
 } = require('../../lib/gateway.js');
 
 const SECRETS = {
-  wazuh: 'a'.repeat(64),
   splunk: 'b'.repeat(64),
   elastic: 'c'.repeat(64),
 };
@@ -30,8 +29,8 @@ const NOW = 1_800_000_000; // epoch fijo para que los tests no dependan del relo
 
 /** Construye una petición legítima y firmada. */
 function signedRequest(overrides = {}) {
-  const source = overrides.source ?? 'wazuh';
-  const body = overrides.rawBody ?? JSON.stringify({ rule: { id: '5710' }, agent: { name: 'web-01' } });
+  const source = overrides.source ?? 'splunk';
+  const body = overrides.rawBody ?? JSON.stringify({ sid: '5710', result: { host: 'web-01' } });
   const timestamp = String(overrides.timestamp ?? NOW);
   const secret = overrides.secret ?? SECRETS[source];
   const signature = overrides.signature ?? computeSignature(body, secret, timestamp);
@@ -55,7 +54,7 @@ const opts = { secrets: SECRETS, windowSeconds: 300, now: NOW };
 
 test('acepta una petición correctamente firmada', () => {
   const result = verifyRequest(signedRequest(), opts);
-  assert.equal(result.source, 'wazuh');
+  assert.equal(result.source, 'splunk');
   assert.equal(result.timestamp, NOW);
 });
 
@@ -91,9 +90,9 @@ test('rechaza una petición sin firma', () => {
 });
 
 test('rechaza una firma calculada con el secreto de otro origen', () => {
-  // Escenario real: alguien reutiliza el secreto de Splunk en el emisor de
-  // Wazuh. Debe fallar, no "funcionar por casualidad".
-  const req = signedRequest({ source: 'wazuh', secret: SECRETS.splunk });
+  // Escenario real: alguien reutiliza el secreto de Elastic en el emisor de
+  // Splunk. Debe fallar, no "funcionar por casualidad".
+  const req = signedRequest({ source: 'splunk', secret: SECRETS.elastic });
   assert.throws(() => verifyRequest(req, opts), (e) => e.code === 'firma_invalida');
 });
 
@@ -126,11 +125,11 @@ test('el cuerpo parseado y reserializado NO valida — rawBody es obligatorio', 
   const original = '{"b":2,"a":1}';
   const reserialized = JSON.stringify(JSON.parse(original)); // -> {"b":2,"a":1} u orden distinto
   const ts = String(NOW);
-  const sigOriginal = computeSignature(original, SECRETS.wazuh, ts);
-  const sigReserialized = computeSignature(reserialized, SECRETS.wazuh, ts);
+  const sigOriginal = computeSignature(original, SECRETS.splunk, ts);
+  const sigReserialized = computeSignature(reserialized, SECRETS.splunk, ts);
   // En este caso concreto el orden se conserva, pero basta un espacio:
   const conEspacios = '{"b": 2, "a": 1}';
-  assert.notEqual(computeSignature(conEspacios, SECRETS.wazuh, ts), sigOriginal);
+  assert.notEqual(computeSignature(conEspacios, SECRETS.splunk, ts), sigOriginal);
   assert.equal(sigReserialized, sigOriginal); // mismo texto -> mismo hash
 });
 
@@ -179,7 +178,7 @@ test('rechaza un origen desconocido', () => {
 test('rechaza si no hay secreto configurado para el origen', () => {
   const req = signedRequest({ source: 'elastic' });
   assert.throws(
-    () => verifyRequest(req, { ...opts, secrets: { wazuh: SECRETS.wazuh } }),
+    () => verifyRequest(req, { ...opts, secrets: { splunk: SECRETS.splunk } }),
     (e) => e.code === 'secreto_no_configurado',
   );
 });

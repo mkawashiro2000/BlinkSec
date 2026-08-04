@@ -90,49 +90,10 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "=https://thehive.example.com/api/v1/alert",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ type: 'blinksec', source: $('Componer ticket').first().json.alertaSaneada.source, sourceRef: $('Componer ticket').first().json.alert_id, title: $('Componer ticket').first().json.titulo, description: $('Componer ticket').first().json.descripcion, severity: $('Componer ticket').first().json.severidad, tags: $('Componer ticket').first().json.tags, observables: $('Componer ticket').first().json.observables }) }}",
-        "options": {
-          "timeout": 15000,
-          "response": {
-            "response": {
-              "fullResponse": true,
-              "neverError": true
-            }
-          }
-        }
-      },
-      "id": "wf06-thehive",
-      "name": "Crear alerta en TheHive",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        280,
-        220
-      ],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "blinksec-thehive",
-          "name": "TheHive API"
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000,
-      "onError": "continueErrorOutput",
-      "notes": "sourceRef = alert_id: TheHive deduplica por ese campo, lo que da una segunda capa de idempotencia independiente de nuestra base de datos."
-    },
-    {
-      "parameters": {
         "operation": "executeQuery",
         "query": "UPDATE blinksec.alerts SET ticket_ref = $2 WHERE alert_id = $1;",
         "options": {
-          "queryReplacement": "={{ [$('Componer ticket').first().json.alert_id, $json.body?._id ?? 'sin-referencia'] }}"
+          "queryReplacement": "={{ [$('Componer ticket').first().json.alert_id, $('Componer ticket').first().json.alert_id] }}"
         }
       },
       "id": "wf06-save-ref",
@@ -140,7 +101,7 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        500,
+        280,
         220
       ],
       "credentials": {
@@ -149,20 +110,8 @@
           "name": "BlinkSec Postgres"
         }
       },
-      "onError": "continueRegularOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "// WF-06 · Rama de contingencia del ticketing.\n//\n// Si TheHive está caído, la contención YA se ejecutó: la amenaza está\n// neutralizada y lo que falta es el registro. Perder ese registro por una\n// caída de la plataforma de tickets sería inaceptable, así que se deposita en\n// un repositorio estático para reproceso posterior.\n//\n// Nunca se interrumpe el flujo por un fallo de ticketing: el orden de\n// prioridades es contener > registrar > notificar.\n\nconst t = $('Componer ticket').first().json;\n\nreturn [\n  {\n    json: {\n      evento: 'ticket_fallido',\n      alert_id: t.alert_id,\n      titulo: t.titulo,\n      descripcion: t.descripcion,\n      severidad: t.severidad,\n      motivo: $input.first().json.error?.message ?? 'plataforma de tickets no disponible',\n      reprocesable: true,\n      timestamp: new Date().toISOString(),\n    },\n  },\n];"
-      },
-      "id": "wf06-fallback",
-      "name": "Contingencia: guardar para reproceso",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        280,
-        420
-      ]
+      "onError": "continueRegularOutput",
+      "notes": "TheHive se retiró del sistema (ver docs/riesgos.md, R-19): no hay plataforma externa de tickets conectada todavía. ticket_ref se rellena con el propio alert_id — Postgres es, por ahora, el único sistema de tickets. La cadena de custodia completa que compone 'Componer ticket' (descripcion, observables) queda sin destino hasta que se conecte un ticketing real; sólo título/puntuación/alert_id llegan a Slack."
     },
     {
       "parameters": {
@@ -233,7 +182,7 @@
       "main": [
         [
           {
-            "node": "Crear alerta en TheHive",
+            "node": "Guardar referencia",
             "type": "main",
             "index": 0
           }
@@ -241,36 +190,7 @@
         []
       ]
     },
-    "Crear alerta en TheHive": {
-      "main": [
-        [
-          {
-            "node": "Guardar referencia",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Contingencia: guardar para reproceso",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Guardar referencia": {
-      "main": [
-        [
-          {
-            "node": "Notificar al SOC",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Contingencia: guardar para reproceso": {
       "main": [
         [
           {
@@ -290,7 +210,7 @@
   "meta": {
     "blinksec": {
       "fase": 6,
-      "descripcion": "Crea el ticket con la cadena de custodia completa y notifica al SOC. Idempotente por alert_id y con rama de contingencia si la plataforma de tickets cae."
+      "descripcion": "Compone el ticket, deduplica por alert_id y notifica al SOC por Slack. TheHive se retiró del sistema (ver docs/riesgos.md, R-19): no hay plataforma externa de tickets conectada — el registro vive sólo en Postgres."
     }
   }
 }

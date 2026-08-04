@@ -2,7 +2,7 @@
 
 ## El problema
 
-Los webhooks se disparan por duplicado. Wazuh reintenta si el POST expira,
+Los webhooks se disparan por duplicado. Splunk reintenta si el POST expira,
 Elastic puede reenviar un lote entero cuando sólo una alerta es nueva, y una
 integración configurada dos veces por descuido entrega todo dos veces.
 
@@ -29,7 +29,7 @@ separado.
 
 Primera línea, rápida. Cubre la reentrega inmediata, que es el caso frecuente.
 
-### 3. UPSERT en Postgres (WF-01) y `sourceRef` en TheHive (WF-06)
+### 3. UPSERT en Postgres (WF-01) y `ticket_ref` en WF-06
 
 Capa duradera. Sobrevive a un reinicio de Redis. `ON CONFLICT DO UPDATE` con
 `RETURNING (xmax = 0) AS es_nueva` distingue una inserción real de una
@@ -84,9 +84,15 @@ compensación que hay que decidir a la vista del volumen real.
 
 - **`revoke_session`** — revocar dos veces no tiene efecto adicional.
 - **`kill_process`** — matar un proceso ya muerto no hace nada.
-- **`block_ip` en `custom-ar.py`** — comprueba con `iptables -C` antes de
-  insertar, así que repetirlo no acumula reglas duplicadas.
 
-El único caso con efecto acumulativo real sería crear reglas en un WAF externo
-sin comprobar antes. Por eso el `undo_payload` de Cloudflare declara
-explícitamente que necesita el `RULE_ID` devuelto por la API.
+**`block_ip` en Cloudflare SÍ tiene efecto acumulativo real** — crear una
+regla de firewall dos veces crea dos reglas, Cloudflare no deduplica por
+IP. Antes de retirar Wazuh (ver R-19 en `riesgos.md`), este caso lo cubría
+`custom-ar.py` comprobando `iptables -C` antes de insertar; ese script ya
+no existe. La capa 1 (`alert_id` determinista) y la 2 (nonce en Redis)
+siguen evitando que la MISMA alerta dispare el plan de contención dos
+veces, así que el riesgo práctico es bajo, pero no hay una tercera
+comprobación a nivel de la API de Cloudflare misma. Por eso el
+`undo_payload` de Cloudflare declara explícitamente que necesita el
+`RULE_ID` devuelto por la API — para poder revertir la regla concreta que
+se creó, no una regla cualquiera que coincida con la IP.

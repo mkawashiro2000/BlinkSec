@@ -22,9 +22,8 @@ const fixture = (name) => fs.readFileSync(path.join(__dirname, name), 'utf8');
 
 const CAMPOS_OBLIGATORIOS = ['blinksec_version', 'source', 'rule', 'asset', 'identity', 'artifacts', 'validation'];
 
-test('las tres plataformas producen el mismo contrato', () => {
+test('las dos plataformas producen el mismo contrato', () => {
   const casos = [
-    ['wazuh', fixture('wazuh-sshd-bruteforce.json')],
     ['splunk', fixture('splunk-native-alert.json')],
     ['elastic', fixture('elastic-ndjson-multi.ndjson')],
   ];
@@ -39,38 +38,6 @@ test('las tres plataformas producen el mismo contrato', () => {
     assert.ok(Array.isArray(alerta.artifacts.hashes), `${source}: artifacts.hashes debe ser array`);
     assert.equal(typeof alerta.rule.level, 'number', `${source}: rule.level debe ser numérico`);
   }
-});
-
-// ---------------------------------------------------------------------------
-// Wazuh
-// ---------------------------------------------------------------------------
-
-test('wazuh: extrae la IP de origen de un ataque de fuerza bruta SSH', () => {
-  const [a] = normalize('wazuh', fixture('wazuh-sshd-bruteforce.json'));
-  assert.deepEqual(a.artifacts.ips, [{ value: '45.155.205.233', direction: 'src' }]);
-  assert.equal(a.asset.host, 'web-01');
-  assert.equal(a.identity.user, 'admin');
-  assert.equal(a.rule.level, 10);
-  assert.deepEqual(a.rule.mitre, ['T1110']);
-  assert.equal(a.validation.enriquecible, true);
-});
-
-test('wazuh: extrae los tres hashes de un evento FIM', () => {
-  const [a] = normalize('wazuh', fixture('wazuh-fim-malware.json'));
-  const tipos = a.artifacts.hashes.map((h) => h.type).sort();
-  assert.deepEqual(tipos, ['md5', 'sha1', 'sha256']);
-  assert.equal(a.asset.host, 'db-prod-01');
-  // Evento de integridad sin IP: enriquecible por hash, no por reputación IP.
-  assert.equal(a.artifacts.ips.length, 0);
-  assert.equal(a.validation.enriquecible, true);
-});
-
-test('wazuh: NO extrae la IP interna del agente como artefacto', () => {
-  // Enviar 10.20.4.11 a AbuseIPDB es filtrar topología interna a un tercero,
-  // y además garantiza un veredicto inútil.
-  const [a] = normalize('wazuh', fixture('wazuh-sshd-bruteforce.json'));
-  const valores = a.artifacts.ips.map((i) => i.value);
-  assert.ok(!valores.includes('10.20.4.11'));
 });
 
 // ---------------------------------------------------------------------------
@@ -141,7 +108,7 @@ test('parseLoose: lanza ante cuerpo vacío', () => {
 // ---------------------------------------------------------------------------
 
 test('marca como no válida una alerta sin host ni regla', () => {
-  const [a] = normalize('wazuh', JSON.stringify({ data: { srcip: '8.8.8.8' } }));
+  const [a] = normalize('splunk', JSON.stringify({ result: { src_ip: '8.8.8.8' } }));
   assert.equal(a.validation.ok, false);
   assert.ok(a.validation.problemas.includes('asset.host ausente'));
   assert.ok(a.validation.problemas.includes('rule.id ausente'));
@@ -151,11 +118,11 @@ test('marca como no enriquecible una alerta sin artefactos', () => {
   // Caso legítimo: escalada de privilegios local, sin IP ni hash. No debe
   // intentar puntuarse por reputación — va directa a investigación humana.
   const payload = JSON.stringify({
-    rule: { id: '5402', description: 'Successful sudo to ROOT executed', level: 3 },
-    agent: { name: 'app-03' },
-    timestamp: '2026-08-02T10:00:00Z',
+    sid: '5402',
+    search_name: 'Successful sudo to ROOT executed',
+    result: { host: 'app-03', urgency: 'low' },
   });
-  const [a] = normalize('wazuh', payload);
+  const [a] = normalize('splunk', payload);
   assert.equal(a.validation.ok, true);
   assert.equal(a.validation.enriquecible, false);
 });
@@ -163,7 +130,7 @@ test('marca como no enriquecible una alerta sin artefactos', () => {
 test('un activo desconocido se asume crítico, no prescindible', () => {
   // Default conservador: si la consulta al inventario falla, el sistema debe
   // pedir aprobación humana antes de aislar, no asumir que da igual.
-  const [a] = normalize('wazuh', fixture('wazuh-sshd-bruteforce.json'));
+  const [a] = normalize('splunk', fixture('splunk-native-alert.json'));
   assert.equal(a.asset.criticality, 'high');
 });
 

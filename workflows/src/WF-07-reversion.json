@@ -80,8 +80,8 @@
     },
     {
       "parameters": {
-        "method": "PUT",
-        "url": "=https://wazuh.example.com:55000{{ $json.undo_payload.path }}",
+        "method": "DELETE",
+        "url": "=https://api.cloudflare.com/client/v4{{ $json.undo_payload.path }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
@@ -107,14 +107,15 @@
       ],
       "credentials": {
         "httpHeaderAuth": {
-          "id": "blinksec-wazuh",
-          "name": "Wazuh API"
+          "id": "blinksec-cloudflare",
+          "name": "Cloudflare API"
         }
       },
       "retryOnFail": true,
       "maxTries": 3,
       "waitBetweenTries": 5000,
-      "onError": "continueRegularOutput"
+      "onError": "continueRegularOutput",
+      "notes": "Cloudflare es la única plataforma de bloqueo de IP soportada tras retirar Wazuh (ver docs/riesgos.md, R-19). Método fijo en DELETE — mismo razonamiento que WF-08."
     },
     {
       "parameters": {

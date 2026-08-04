@@ -4,41 +4,61 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
-## R-19 · Wazuh y TheHive reales, sin conectar (ABIERTO)
+## R-19 · Wazuh y TheHive retirados del sistema (CERRADO — decisión explícita, no sólo pendiente)
 
-WF-08 (`Ejecutar contención`) y WF-06 (`Crear alerta en TheHive`) siguen
-apuntando a placeholders — `https://wazuh.example.com:55000/active-response`
-y `https://thehive.example.com/api/v1/alert` respectivamente. Todo lo
-probado de extremo a extremo contra "Wazuh" y "TheHive" en R-13 fue en
-realidad contra `tools/mock-services.js`, nunca contra las APIs reales.
-Las credenciales `blinksec-wazuh` y `blinksec-thehive` existen en n8n pero
-sin URL real que las use.
-
-**Wazuh**: se evaluó Wazuh Cloud (`console.cloud.wazuh.com`) como opción
-gestionada — descartado porque crear un *environment* cuesta **$632/mes**,
-desproporcionado para este proyecto. La alternativa es autoalojar Wazuh
-(es open source, sin coste de licencia), pero el manager+indexer+dashboard
+Historial: primero se evaluó conectar Wazuh real. Se descartó Wazuh Cloud
+(`console.cloud.wazuh.com`) porque crear un *environment* cuesta
+**$632/mes**, desproporcionado para este proyecto. La alternativa —
+autoalojar Wazuh, que es open source y sin coste de licencia— tampoco era
+viable en la Raspberry Pi de este proyecto: el manager+indexer+dashboard
 completo recomienda oficialmente 4 GB+ sólo para el indexer (basado en
-OpenSearch) y en la práctica ronda 8 GB dedicados. La Raspberry Pi de este
-proyecto tiene 7.6 GB totales, de los cuales sólo ~4.5 GB están realmente
-libres (contando caché liberable), **compartidos con ~20 contenedores
+OpenSearch) y en la práctica ronda 8 GB dedicados, mientras que este host
+sólo tiene ~4.5 GB realmente libres, **compartidos con ~20 contenedores
 ajenos a BlinkSec** (Nextcloud, Jellyfin, Sonarr/Radarr, Kensho, etc.).
-Instalar el stack completo de Wazuh aquí arriesgaba dejar sin memoria a
-esos otros servicios del mismo host, no sólo a BlinkSec.
+Instalarlo aquí arriesgaba dejar sin memoria a esos otros servicios, no
+sólo a BlinkSec. TheHive, por su parte, nunca tuvo una instancia real
+disponible ni URL confirmada.
 
-**Decisión**: queda pendiente hasta que haya una máquina con más margen
-—otro equipo, una VM aparte, o un plan más barato de Wazuh Cloud si
-existe— donde alojar Wazuh sin competir por RAM con el resto de la
-infraestructura de este servidor. No se creó ningún *environment* de pago
-en Wazuh Cloud.
+**Decisión final: se retiraron ambos del sistema por completo**, en vez de
+dejarlos indefinidamente "pendientes de infraestructura". Alcance de la
+retirada:
 
-**TheHive**: aún sin URL real proporcionada — nunca se llegó a confirmar
-si hay una instancia propia o gestionada disponible. Sigue abierto,
-sin decisión tomada todavía.
+- **Ingesta**: Wazuh eliminado de `lib/gateway.js` (`KNOWN_SOURCES`) y
+  `lib/normalize.js` (`normalizeWazuh` eliminado). Quedan Splunk y Elastic
+  como únicas fuentes. `integrations/wazuh/` (wrapper Python, script de
+  respuesta activa, snippet de `ossec.conf`) se borró por completo.
+- **Contención**: `lib/containment.js` pierde la plataforma `wazuh_ar` de
+  `blockIp()`. **Cloudflare pasa a ser la única plataforma de bloqueo de
+  IP soportada y el nuevo default** (antes era `wazuh_ar` por defecto).
+  WF-08 (`Ejecutar contención`) y WF-07 (`Ejecutar reversión`) se
+  reescribieron para hablar con la API real de Cloudflare
+  (`api.cloudflare.com/client/v4`, método fijo POST/DELETE respectivamente)
+  en vez del `active-response` de Wazuh.
+- **Ticketing**: WF-06 pierde el nodo `Crear alerta en TheHive` y su rama
+  de contingencia (que existía específicamente para una caída de TheHive).
+  `ticket_ref` ahora se rellena con el propio `alert_id` — **Postgres es,
+  por ahora, el único sistema de tickets**; WF-06 sigue deduplicando y
+  notificando al SOC por Slack, pero la cadena de custodia completa que
+  compone (`descripcion`, `observables`) no tiene destino externo hasta
+  que se conecte una plataforma real. WF-03 pierde el nodo `Cerrar alerta
+  en SIEM` (que marcaba `Ignored` en TheHive para los falsos positivos);
+  esa rama ahora va directo a registrar métricas.
 
-Mientras tanto, WF-06 y WF-08 siguen probados sólo contra el mock (ver
-R-13) — funcionalmente correctos, pero sin verificar contra las APIs
-reales, como ya advertía el README antes de esta sesión.
+**Riesgo real heredado, no introducido por esta retirada**: el
+`undo_payload` de Cloudflare declara `requires: ['RULE_ID']` porque el id
+de la regla creada no se conoce hasta la respuesta de la API — pero
+**ningún nodo del workflow sustituye ese `{{RULE_ID}}` todavía** antes de
+persistir en `containment_log`. Esto ya era cierto antes de esta sesión
+(Cloudflare nunca se ejercitó de verdad, sólo se ensayó `wazuh_ar` contra
+el mock), pero ahora que Cloudflare es la única plataforma activa, el
+gap es inmediatamente relevante: sin esa sustitución, WF-07 intentará
+revertir literalmente `.../rules/{{RULE_ID}}` y fallará siempre. Pendiente
+de implementar antes de ejercitar la contención contra Cloudflare real —
+ver también el punto 6 de "Antes de producción" en el README.
+
+Todo esto se verificó con `npm run verify` (155/155 tests) y con el
+compilador de workflows (`node tools/build-workflows.js`) tras cada
+cambio — no se tocó el despliegue en vivo de n8n en esta pasada.
 
 ## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (CERRADO — verificado en ejecución real)
 

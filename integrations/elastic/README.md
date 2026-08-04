@@ -59,7 +59,7 @@ salidas:
    la allowlist del proxy está bien puesta.
 
 2. **Reenvío firmado desde Logstash o una Function** (recomendado). Un salto
-   intermedio que firma con el mismo esquema que Wazuh y Splunk.
+   intermedio que firma con el mismo esquema que Splunk.
 
 Este repo asume la **opción 1 con allowlist de red estricta** para Elastic, y lo
 declara como una diferencia real de postura de seguridad respecto a las otras

@@ -43,12 +43,15 @@ function firmar(cuerpo, secreto, ts) {
 /** Cada petición lleva una IP y timestamp distintos: alert_id único, sin colisión de idempotencia. */
 function alerta(i) {
   return JSON.stringify({
-    timestamp: new Date(Date.now() - i * 1000).toISOString(),
-    rule: { level: 10, description: 'sshd: brute force', id: '5712', groups: ['sshd'] },
-    agent: { id: String(100 + (i % 50)), name: `host-${i % 50}`, ip: '10.20.4.11' },
-    manager: { name: 'wazuh-mgr-01' },
-    id: `carga-${i}`,
-    data: { srcip: `45.155.${Math.floor(i / 256) % 256}.${i % 256}`, dstuser: 'admin' },
+    sid: '5712',
+    search_name: 'sshd: brute force',
+    result: {
+      _time: new Date(Date.now() - i * 1000).toISOString(),
+      host: `host-${i % 50}`,
+      src_ip: `45.155.${Math.floor(i / 256) % 256}.${i % 256}`,
+      user: 'admin',
+      urgency: 'high',
+    },
   });
 }
 
@@ -80,7 +83,7 @@ async function main() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-BlinkSec-Source': 'wazuh',
+            'X-BlinkSec-Source': 'splunk',
             'X-BlinkSec-Timestamp': ts,
             'X-BlinkSec-Signature': `sha256=${firmar(cuerpo, SECRETO, ts)}`,
           },

@@ -1,6 +1,6 @@
 # BlinkSec
 
-SOAR de código abierto sobre n8n. Ingesta alertas de Wazuh, Splunk o Elastic
+SOAR de código abierto sobre n8n. Ingesta alertas de Splunk o Elastic
 Security, las enriquece con inteligencia de amenazas, las tría con un motor de
 puntuación auditable y ejecuta contramedidas — con intervención humana
 obligatoria donde el impacto lo justifica.
@@ -12,7 +12,7 @@ SIEM ──HMAC──▶ WF-00 gateway ──▶ WF-01 normalizar ──▶ WF-0
                                           ┌─────────────────┼─────────────────┐
                                     <20 falso positivo  20-70 investigar  >70 crítico
                                           │                 │                 │
-                                    cerrar en SIEM     WF-06 ticket    WF-04 despacha
+                                   registrar métrica   WF-06 ticket    WF-04 despacha
                                                                        ┌──────┴──────┐
                                                                 sin aprobación   WF-05 HITL
                                                                        │        (Slack + Wait)
@@ -25,7 +25,7 @@ SIEM ──HMAC──▶ WF-00 gateway ──▶ WF-01 normalizar ──▶ WF-0
 ## Estado
 
 MVP funcional, **desplegado y verificado en ejecución real** sobre n8n 1.72.1
-(Docker, modo queue, Postgres + Redis + Caddy). 160 tests en verde.
+(Docker, modo queue, Postgres + Redis + Caddy). 155 tests en verde.
 
 Verificado de extremo a extremo contra el despliegue:
 
@@ -51,7 +51,7 @@ Verificado de extremo a extremo contra el despliegue:
   R-12 en `docs/riesgos.md`. Ahora hay un chequeo dedicado
   (`npm run check:caddy-env`) que lo bloquea en CI.
 - **Contención y Human-in-the-Loop probados de extremo a extremo** contra un
-  stack de mocks (Wazuh, TheHive, AbuseIPDB, VirusTotal, CrowdSec CTI):
+  stack de mocks (Cloudflare, AbuseIPDB, VirusTotal, CrowdSec CTI):
   auto-contención sobre activo de baja criticidad, aprobación humana real vía
   el webhook de reanudación de n8n, rechazo explícito, y timeout real (el
   `wait-tracker` de n8n reanuda solo tras 10 s sin respuesta, sin ejecutar
@@ -62,10 +62,12 @@ Verificado de extremo a extremo contra el despliegue:
   un nuevo subflujo, **WF-08**, de forma que ni WF-04 ni WF-05 esperan ya el
   uno al otro. Ver R-13 en `docs/riesgos.md`.
 
-Lo que **no** está verificado: las APIs reales de inteligencia (no hay claves)
-y un manager de Wazuh real — sus respuestas se simularon con un mock fiel a la
-forma de cada API, pero no son las APIs de verdad. Ver
-[Antes de producción](#antes-de-producción) y [docs/riesgos.md](docs/riesgos.md).
+Lo que **no** está verificado: Cloudflare real como plataforma de contención,
+y no hay ninguna plataforma de ticketing externa conectada (TheHive y Wazuh
+se retiraron del sistema — ver R-19 en `docs/riesgos.md`) — sus respuestas se
+simularon con un mock fiel a la forma de cada API, pero no son las APIs de
+verdad. Ver [Antes de producción](#antes-de-producción) y
+[docs/riesgos.md](docs/riesgos.md).
 
 ### Rendimiento medido
 
@@ -155,8 +157,8 @@ lib/            módulos de dominio, puros y testeables (gateway, normalize, enr
 scoring/        motor de triaje + pesos versionados aparte
 workflows/src/  plantillas de workflow con marcadores de inyección
 workflows/dist/ compilados, listos para importar en n8n  ← generado, no editar
-tools/          compilador, validador y mock-services.js (mocks de Wazuh/TheHive/intel para ensayos sin credenciales)
-integrations/   lado SIEM: Wazuh, Splunk, Elastic
+tools/          compilador, validador y mock-services.js (mocks de Cloudflare/intel para ensayos sin credenciales)
+integrations/   lado SIEM: Splunk, Elastic
 tests/          gateway · fixtures · triage · build
 docker/         compose endurecido, Caddy, esquema de Postgres
 docs/           runbooks y registro de riesgos
@@ -170,8 +172,8 @@ npm test
 
 | Suite | Qué cubre |
 |---|---|
-| `tests/gateway/` | HMAC, replay, idempotencia; interoperabilidad real Python↔JS |
-| `tests/fixtures/` | Normalización de las tres plataformas al contrato común |
+| `tests/gateway/` | HMAC, replay, idempotencia |
+| `tests/fixtures/` | Normalización de las dos plataformas al contrato común |
 | `tests/triage/` | Corpus etiquetado de 20 casos + matriz de confusión |
 | `tests/build/` | Que `dist/` refleja `lib/` y `scoring/`, y las reglas anti-fallo-silencioso |
 
@@ -194,17 +196,25 @@ positivos auto-contenidos**.
    copiada no falla de forma visible: el sistema puntuaría todo como "IoC
    desconocido" y quedaría ciego pareciendo sano (R-09). El runbook indica la
    comprobación concreta.
-4. **Sustituir los endpoints de ejemplo**: `wazuh.example.com`,
-   `thehive.example.com` y `soar.example.com` aparecen en workflows e
-   integraciones.
+4. **Sustituir el endpoint de ejemplo**: `soar.example.com` aparece en
+   workflows e integraciones.
 5. **Validar el nodo Redis de WF-00.** La idempotencia necesita semántica
    SETNX; según la versión del nodo puede requerir el patrón alternativo de
    `docs/runbook-idempotencia.md`.
-6. **Repetir el ensayo de contención contra la infraestructura real** (no el
-   mock): bloquear una IP de prueba en el Wazuh real, verificar el registro,
-   verificar la reversión. El flujo en sí ya está verificado contra un mock
-   fiel (R-13); lo que falta es la integración con la API real.
-7. **Re-etiquetar el corpus** con 100+ alertas reales y recalcular la matriz.
+6. **Implementar la sustitución del `RULE_ID` de Cloudflare** antes de
+   ejercitar la contención real: `lib/containment.js` declara que el
+   `undo_payload` de un bloqueo en Cloudflare necesita el id de la regla
+   creada, pero ningún nodo del workflow lo rellena todavía en
+   `containment_log` — sin esto, WF-07 nunca podrá revertir un bloqueo real
+   (ver R-19). Luego, **repetir el ensayo de contención contra la
+   infraestructura real** (no el mock): bloquear una IP de prueba en
+   Cloudflare real, verificar el registro, verificar la reversión. El
+   flujo en sí ya está verificado contra un mock fiel (R-13); lo que falta
+   es la integración con la API real.
+7. **Conectar una plataforma de ticketing externa**, si se necesita una:
+   TheHive se retiró del sistema (R-19) y WF-06 hoy sólo registra en
+   Postgres y notifica por Slack.
+8. **Re-etiquetar el corpus** con 100+ alertas reales y recalcular la matriz.
 
 Los riesgos abiertos y las excepciones conscientes al modelo de amenaza están
 en [docs/riesgos.md](docs/riesgos.md).

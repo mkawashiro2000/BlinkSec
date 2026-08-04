@@ -267,8 +267,9 @@ function validarWorkflow(wf, fichero) {
   ]);
 
   // Campos que un HTTP Request SÍ deja legítimamente en $json: leer
-  // $json.body.algo es leer la respuesta a propósito (ej. el _id que devolvió
-  // TheHive al crear el ticket), no una suposición rota sobre datos previos.
+  // $json.body.algo es leer la respuesta a propósito (ej. el id de regla que
+  // devuelve Cloudflare al crear un bloqueo), no una suposición rota sobre
+  // datos previos.
   // Postgres no tiene un equivalente estable (las columnas del SELECT/RETURNING
   // varían por consulta), así que para Postgres cualquier $json suelto se trata
   // como sospechoso.

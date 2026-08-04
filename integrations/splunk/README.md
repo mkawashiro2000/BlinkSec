@@ -59,7 +59,7 @@ BlinkSec. Hay dos caminos:
    es `<timestamp>.<cuerpo>` y el timestamp debe venir en cabecera.
 
 2. **Más simple y el que usa este repo** — un script de alerta intermedio
-   (`send_to_blinksec.py`), igual en espíritu al wrapper de Wazuh, que firma
+   (`send_to_blinksec.py`), que firma
    con el mismo esquema. Elimina la dependencia de una app de terceros y hace
    que las tres plataformas compartan exactamente el mismo verificador.
 
