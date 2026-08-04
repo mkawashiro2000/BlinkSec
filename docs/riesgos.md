@@ -4,6 +4,42 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
+## R-19 · Wazuh y TheHive reales, sin conectar (ABIERTO)
+
+WF-08 (`Ejecutar contención`) y WF-06 (`Crear alerta en TheHive`) siguen
+apuntando a placeholders — `https://wazuh.example.com:55000/active-response`
+y `https://thehive.example.com/api/v1/alert` respectivamente. Todo lo
+probado de extremo a extremo contra "Wazuh" y "TheHive" en R-13 fue en
+realidad contra `tools/mock-services.js`, nunca contra las APIs reales.
+Las credenciales `blinksec-wazuh` y `blinksec-thehive` existen en n8n pero
+sin URL real que las use.
+
+**Wazuh**: se evaluó Wazuh Cloud (`console.cloud.wazuh.com`) como opción
+gestionada — descartado porque crear un *environment* cuesta **$632/mes**,
+desproporcionado para este proyecto. La alternativa es autoalojar Wazuh
+(es open source, sin coste de licencia), pero el manager+indexer+dashboard
+completo recomienda oficialmente 4 GB+ sólo para el indexer (basado en
+OpenSearch) y en la práctica ronda 8 GB dedicados. La Raspberry Pi de este
+proyecto tiene 7.6 GB totales, de los cuales sólo ~4.5 GB están realmente
+libres (contando caché liberable), **compartidos con ~20 contenedores
+ajenos a BlinkSec** (Nextcloud, Jellyfin, Sonarr/Radarr, Kensho, etc.).
+Instalar el stack completo de Wazuh aquí arriesgaba dejar sin memoria a
+esos otros servicios del mismo host, no sólo a BlinkSec.
+
+**Decisión**: queda pendiente hasta que haya una máquina con más margen
+—otro equipo, una VM aparte, o un plan más barato de Wazuh Cloud si
+existe— donde alojar Wazuh sin competir por RAM con el resto de la
+infraestructura de este servidor. No se creó ningún *environment* de pago
+en Wazuh Cloud.
+
+**TheHive**: aún sin URL real proporcionada — nunca se llegó a confirmar
+si hay una instancia propia o gestionada disponible. Sigue abierto,
+sin decisión tomada todavía.
+
+Mientras tanto, WF-06 y WF-08 siguen probados sólo contra el mock (ver
+R-13) — funcionalmente correctos, pero sin verificar contra las APIs
+reales, como ya advertía el README antes de esta sesión.
+
 ## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (CERRADO — verificado en ejecución real)
 
 Tras retirar GreyNoise e IBM X-Force (R-14, R-17), se incorporó **CrowdSec
