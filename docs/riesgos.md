@@ -4,7 +4,7 @@ Riesgos abiertos y excepciones conscientes al modelo de amenaza. Se documentan
 aquí porque un riesgo aceptado y escrito es una decisión de ingeniería; el mismo
 riesgo sin escribir es una sorpresa esperando fecha.
 
-## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (ABIERTO — pendiente de aplicar al despliegue en vivo)
+## R-18 · CrowdSec CTI como reemplazo de GreyNoise/X-Force (CERRADO — verificado en ejecución real)
 
 Tras retirar GreyNoise e IBM X-Force (R-14, R-17), se incorporó **CrowdSec
 CTI** (`https://cti.api.crowdsec.net/v2/smoke/{ip}`) como tercera fuente de
@@ -59,30 +59,32 @@ el error del nodo (`getaddrinfo ENOTFOUND cti.crowdsec.net`) directamente
 de `execution_data`. Recordatorio de por qué la verificación en ejecución
 real importa más que "los tests pasan".
 
-**Aplicado al despliegue en vivo, pero con la clave sin verificar aún
-(ABIERTO).** `workflows/dist/WF-02-enriquecimiento.json` con el hostname
-corregido ya se reimportó en la instancia real (`n8n import:workflow`), y
-la credencial `blinksec-crowdsec` se creó desde la UI de n8n (mismo patrón
-de id interno generado por n8n que R-17 con X-Force — parcheada en
-caliente en `workflow_entity` para apuntar al id real; se perderá en la
-próxima reimportación si no se recrea por CLI con el id literal). El
-nombre de la cabecera se confirmó correcto (`x-api-key`).
+**Aplicado al despliegue en vivo — pasó por el mismo bug de UI que
+X-Force, resuelto igual: importación por CLI.** Con el hostname
+corregido, una primera credencial `blinksec-crowdsec` creada desde la UI
+de n8n devolvía `403 {"message":"Forbidden"}` en ejecución real. Se aisló
+con un `curl -i -H "x-api-key: <clave>" https://cti.api.crowdsec.net/v2/smoke/8.8.8.8`
+ejecutado por el operador directamente, fuera de n8n: la clave funcionaba
+perfectamente (`200`, respuesta real de CrowdSec) — así que el 403 era un
+problema de cómo había quedado guardada la credencial en n8n, no de la
+clave ni de la cuenta. Mismo bug de fondo que R-17 documentó para
+X-Force: el formulario de credenciales de n8n puede no persistir
+correctamente el valor de un campo de contraseña al editarlo.
 
-Con eso reimportado, una alerta de prueba real (`8.8.8.8`) muestra que la
-petición ya llega al hostname correcto pero **CrowdSec responde `403
-{"message":"Forbidden"}`** — la clave o el estado de la cuenta, no algo de
-n8n ni de BlinkSec. AbuseIPDB y VirusTotal siguen en `200` sin problema, y
-—esto es lo que importa— el 403 de CrowdSec **no** activó
-`partial_enrichment` (`_meta.providersOk: 2, failed: [], partial: false`
-en la ejecución real): el diseño best-effort de más arriba funciona
-exactamente como se pretendía, en producción, no sólo en el test.
+**Resuelto sin tocar la UI de credenciales**: se borró la credencial rota
+y se importó de nuevo por `n8n import:credentials` con un JSON que incluye
+directamente `"id": "blinksec-crowdsec"` (el operador escribió el fichero
+y ejecutó el import él mismo en el servidor; el valor de la clave nunca
+pasó por este chat). Al usar el id literal desde el import, no hizo falta
+ningún parche en caliente de `workflow_entity` — el nodo ya apuntaba al id
+correcto de fábrica. **Verificado con una alerta real**: los tres nodos
+(AbuseIPDB, VirusTotal, CrowdSec CTI) responden `200` en la misma
+ejecución.
 
-**Siguiente paso, pendiente**: aislar el 403 con un `curl -i -H
-"x-api-key: <clave>" https://cti.api.crowdsec.net/v2/smoke/8.8.8.8`
-ejecutado directamente por el operador desde su máquina, fuera de n8n —
-mismo patrón que aisló el 401 de X-Force como problema de cuenta de IBM
-(R-17). Con sólo 120 consultas/mes, reservar cualquier prueba adicional a
-una única llamada, no a una ráfaga.
+Queda como recomendación operativa para el futuro: si aparece de nuevo el
+bug de `__n8n_BLANK_VALUE_...` al crear o editar cualquier credencial de
+n8n, no reintentar en el formulario — ir directo a `n8n
+import:credentials` con el id literal, como aquí y en R-17.
 
 **Consecuencia real de tener tres fuentes de IP en vez de dos**: mejora el
 margen de corroboración para IPs *cuando CrowdSec tiene cuota disponible*,
