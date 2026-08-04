@@ -208,6 +208,46 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-17 · Estado real de las credenciales de inteligencia conectadas (ABIERTO)
+
+Verificado en ejecución real contra n8n, enviando una alerta firmada con
+`1.1.1.1` como IP y comprobando el código de respuesta HTTP de cada
+proveedor (nunca las claves en sí — sólo los `statusCode` que devuelve cada
+nodo):
+
+| Proveedor | Estado | Evidencia |
+|---|---|---|
+| **AbuseIPDB** | ✅ Funciona | `200`, respuesta real y coherente para 1.1.1.1 (Cloudflare, `isWhitelisted: true`) |
+| **VirusTotal** | ✅ Funciona | `200`, respuesta real y coherente (`attributes.reputation`, análisis de motores) |
+| **GreyNoise** | ❌ `401 unauthorized` | La credencial en n8n nunca se actualizó con una clave real — sigue con el valor de prueba de la Fase 7. Ver R-14. |
+| **IBM X-Force** | ❌ `401 Not authorized` | Confirmado que **no es un problema de n8n ni de BlinkSec**: el mismo 401 se reproduce con `curl -u '<key>:<password>'` directo contra `api.xforce.ibmcloud.com`, ejecutado por el propio operador desde su máquina, fuera de este sistema por completo. El problema está en la cuenta/clave de IBM X-Force Exchange — necesita resolverse directamente con IBM (activación de cuenta, regeneración de clave, o nivel de acceso insuficiente). |
+
+**Nota operativa sobre X-Force, para cuando se resuelva del lado de IBM.**
+Al depurar el 401, se descubrió y corrigió un problema real de proceso: la
+credencial de X-Force se recreó **desde la UI de n8n** (por un bug de la
+propia UI con `__n8n_BLANK_VALUE_...` al editar el campo de contraseña de
+una credencial existente — no guardaba el valor nuevo). Una credencial
+creada desde la UI recibe un **id interno generado por n8n** (ej.
+`S67d2KI8vkYoJrUH`), distinto del id literal `blinksec-xforce` que el nodo
+del workflow espera y que sí usan las credenciales importadas por CLI
+(`n8n import:credentials`, ver runbook de despliegue). Se parcheó la
+referencia del nodo en caliente para apuntar al id real.
+
+**Esto se perderá en la próxima reimportación de workflows** (`n8n
+import:workflow --input=/workflows/dist`), porque el parche vive sólo en la
+base de datos de esta instancia, no en el repo — `workflows/src/WF-02-...`
+sigue declarando `"id": "blinksec-xforce"`, que es lo correcto para un
+despliegue limpio. Cuando la cuenta de IBM esté resuelta: **la forma
+robusta de fijarlo de manera duradera es borrar la credencial creada por
+UI y volver a importarla por CLI** con el id literal `blinksec-xforce`
+(mismo patrón que `blinksec-slack`, `blinksec-pg`, etc. en el runbook), no
+volver a parchear el workflow a mano cada vez.
+
+Con dos de cuatro proveedores de inteligencia operativos, el sistema
+funciona con normalidad — el techo de enriquecimiento parcial de
+`scoring/weights.json` sigue haciendo su trabajo: ningún veredicto puede
+alcanzar `critical` sin, como mínimo, corroboración de fuentes.
+
 ## R-16 · Tailscale enmascara el origen real ante Docker (ACEPTADO, no es un bug)
 
 Tras corregir el DNS (R-15), el acceso al editor por la IP de Tailscale del
