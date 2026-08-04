@@ -208,6 +208,51 @@ tumbarlo antes de actuar.
 - Redis con alta disponibilidad si el SLA lo exige; el modo queue lo convierte
   en un punto único de fallo para la ingesta.
 
+## R-16 · Tailscale enmascara el origen real ante Docker (ACEPTADO, no es un bug)
+
+Tras corregir el DNS (R-15), el acceso al editor por la IP de Tailscale del
+servidor seguía dando 403 — con `MGMT_ALLOWLIST` correctamente puesto a
+`100.64.0.0/10`. Diagnóstico completo, de la capa de red hacia arriba:
+
+1. `tcpdump` en la interfaz `tailscale0` confirmó que el paquete llega al
+   host con la IP real del cliente (`100.67.98.80`, el MacBook) intacta.
+2. Pero Caddy, dentro del contenedor, ve `remote_ip = 172.24.0.1` — la
+   puerta de enlace de la red Docker de este proyecto, no la IP real.
+3. La reescritura ocurre en una regla propia de `tailscaled`
+   (`ts-postrouting` en la tabla `nat`): **enmascara TODO el tráfico que
+   Tailscale reenvía desde `tailscale0` hacia otra red** — aquí, la red
+   `blinksec` de Docker. Es como Tailscale garantiza que el tráfico de
+   vuelta sepa regresar por `tailscale0` cuando el destino (la red de
+   Docker) no tiene ninguna ruta de vuelta hacia `100.64.0.0/10`.
+
+**Esto no es un fallo de configuración de este host ni de BlinkSec — es
+arquitectura estándar e intencionada de Tailscale** para cualquier tráfico
+que reenvía hacia una red que no es nativamente parte del tailnet. Se
+reproduce igual en cualquier despliegue con Tailscale delante de un
+contenedor Docker.
+
+**Consecuencia real, no cosmética.** Caddy nunca puede ver la IP individual
+de cada dispositivo Tailscale por este camino: todos llegan como
+`172.24.0.1`. El `remote_ip` de `MGMT_ALLOWLIST` deja de poder distinguir
+"tu MacBook autorizado" de "cualquier otro dispositivo del mismo tailnet" —
+la allowlist de Caddy por esta vía es, en la práctica, un cheque en blanco
+para cualquier miembro del tailnet, no una lista de dispositivos concretos.
+
+**Aceptado conscientemente, no ignorado.** El control de acceso real para
+este camino ya lo hace Tailscale mismo: sólo dispositivos autorizados en el
+tailnet (gestionados por sus propias ACLs, fuera de este repo) pueden
+siquiera enviar un paquete a la IP de Tailscale del servidor. La allowlist
+de `MGMT_ALLOWLIST` sigue siendo la barrera real y efectiva para el acceso
+por LAN (`192.168.0.0/16`) y cualquier otra ruta sin NAT de por medio —
+sólo queda debilitada específicamente para el camino vía Tailscale.
+
+**Aplicado**: `MGMT_ALLOWLIST` incluye ahora `172.24.0.1/32` (la puerta de
+enlace de la red `blinksec` de Docker) además del rango de Tailscale. Esa
+dirección concreta depende de la subred que Docker asigne a este proyecto —
+si la red se recrea desde cero, puede cambiar; verificar con
+`docker network inspect docker_blinksec` si `MGMT_ALLOWLIST` deja de
+coincidir tras una recreación completa del stack.
+
 ## R-15 · Sin DNS a internet desde los contenedores (CERRADO, alcance de todo el host)
 
 Al conectar la credencial real de Slack, n8n reportaba "Couldn't connect with
