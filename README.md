@@ -89,5 +89,6 @@ Antes de abrir BlinkSec a tráfico real, completa estos pasos (detalles en docs/
 [ ] Validar semántica de Redis: Confirma que tu nodo Redis soporta SETNX para garantizar la idempotencia de alertas (ver docs/runbook-idempotencia.md).
 [ ] Simulacro Fire-Drill: Ejecuta un ensayo real contra tu infraestructura (ej. bloqueando una IP de prueba en tu Cloudflare de producción y verificando su reversión).
 [ ] Re-etiquetar el corpus: Alimenta el sistema con ~100 alertas reales de tu entorno para calibrar el motor de scoring.
+
 ## Licencia
-Este proyecto está bajo la Licencia MIT - ver el archivo LICENSE para más detalles.
+Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
