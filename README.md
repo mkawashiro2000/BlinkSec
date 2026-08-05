@@ -293,4 +293,4 @@ aprobador es autodeclarado) antes de exponer esto a tráfico real.
 
 ## Licencia
 
-MIT.
+Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) para más detalles.
